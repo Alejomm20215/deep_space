@@ -183,4 +183,5 @@ async def get_result(job_id: str):
     return jobs[job_id].get("result", {})
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    # Use fully-qualified module path when run in a package context
+    uvicorn.run("backend.app:app", host="0.0.0.0", port=8000, reload=False)

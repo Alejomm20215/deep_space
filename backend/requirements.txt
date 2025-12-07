@@ -5,6 +5,7 @@ python-multipart>=0.0.6
 websockets>=12.0
 numpy>=1.26.0
 opencv-python-headless>=4.9.0
+tqdm>=4.66.0
 # torch>=2.2.0 --index-url https://download.pytorch.org/whl/cu121
 trimesh>=4.0.0
 pygltflib>=1.16.0
