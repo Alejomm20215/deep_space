@@ -1,48 +1,108 @@
-## Deep Space 3D – CPU-First Reconstruction Pipeline
+# Deep Space 3D – Reconstruction Service
 
-### What this solves
-- **No GPU? Still usable.** Replaces heavy Fast3R/3DGS with a CPU-friendly pipeline.
-- **Responsive API.** Long steps offloaded to threads; FastAPI/WebSockets keep updating progress.
-- **Downloadable artifacts.** Backend now returns browser-ready URLs under `/outputs/{job_id}/...`.
-- **Automatic depth model fetch.** Downloads a small ONNX depth model if missing; falls back to pseudo depth if offline.
+FastAPI + React/Vite service that turns a short video or a small set of images into downloadable 3D artifacts (GLB, SPLAT, PLY). The pipeline is CPU-first but can opportunistically use GPU acceleration when available.
 
-### Pipeline (current CPU-first flow)
-1. **Frame selection**: Keyframes extracted/resized (~640px) to stay quick.
-2. **Depth estimation**: Pseudo-depth (lightweight); ONNX path removed to keep deps small.
-3. **Fusion**: Depth -> sparse point cloud (lightweight, no Open3D).
-4. **Meshing**: Stub mesh generation (Open3D-free).
-5. **Texture (stub)**: Placeholder GLB to keep flow; ready for a real bake step.
-6. **Export**: Copies GLB/SPLAT/PLY to `backend/outputs/{job_id}` and exposes URLs.
+## Highlights
+- CPU-friendly pipeline with automatic fallbacks (no GPU required; CUDA used if available by ONNX).
+- Three quality presets (`fastest`, `balanced`, `quality`) tuned for speed vs. fidelity.
+- Background processing with WebSocket progress events and REST polling.
+- Browser-ready artifacts exposed at `/outputs/{job_id}/...` (served by FastAPI).
+- Depth model auto-download (Depth Anything V2 ONNX) with an edge-based fallback when offline.
 
-### Key files
-- `backend/core/reconstruction.py` – pseudo-depth + point cloud (minimal deps).
-- `backend/core/mesh_extraction.py` – stub mesh (no Open3D).
-- `backend/core/gaussian_splatting.py` – lightweight passthrough splat.
-- `backend/core/texture_baker.py` – stub GLB writer (placeholder).
-- `backend/core/exporter.py` – emits browser URLs under `/outputs/{job_id}/...`.
+## Architecture & Pipeline
+- **Backend:** FastAPI (`backend/app.py`) orchestrates pipelines and exposes REST + WebSocket endpoints.
+- **Frontend:** React/Vite app (`frontend/`) with proxying for `/api`, `/ws`, `/outputs`.
+- **Pipeline stages:**
+  1. Keyframe extraction from video or image folder (resized to preset resolutions).
+  2. Depth estimation via Depth Anything V2 ONNX (GPU if available); falls back to edge-based depth.
+  3. Sparse reconstruction with a turntable camera assumption → colored point cloud (`reconstruction.py`).
+  4. Gaussian splatting placeholder (currently passes the point cloud through to a `.splat` file).
+  5. Mesh extraction via SciPy Delaunay + filtering (`mesh_extraction.py`).
+  6. Texture/GLB generation as a holographic-style mesh (`texture_baker.py`).
+  7. Exporter copies artifacts to `backend/outputs/{job_id}` and returns HTTP URLs.
 
-### Environment & setup
-1) Install deps:
+## Quality Presets (from `backend/config.py`)
+- **fastest** — 4 keyframes, skips 3DGS, quick Poisson-like mesh + simple texture. ~15–30s.
+- **balanced** — 8 keyframes, light 3DGS passthrough, filtered mesh, blended texture. ~45–90s.
+- **quality** — 16 keyframes, highest res/iterations, refined mesh, neural-blend texture. ~2–4m.
+
+## API Quick Reference
+- `POST /api/upload` — multipart `files` (one video _or_ multiple images), form `mode` = `fastest|balanced|quality` (default `balanced`). Returns `{ job_id }`.
+- `GET /api/status/{job_id}` — current stage/progress.
+- `GET /api/result/{job_id}` — artifact URLs after completion.
+- `WS /ws/{job_id}` — push events: `init`, `progress` (`stage`, `progress`, `detail`), `complete`, `error`.
+- Static files: `/outputs/{job_id}/model.glb`, `/model.splat`, `/pointcloud.ply`.
+
+Example upload:
+```
+curl -X POST http://localhost:8000/api/upload ^
+  -F "files=@sample.mp4" ^
+  -F "mode=balanced"
+```
+Multiple images:
+```
+curl -X POST http://localhost:8000/api/upload ^
+  -F "files=@img1.jpg" -F "files=@img2.jpg" -F "files=@img3.jpg" ^
+  -F "mode=fastest"
+```
+
+## Running Locally (non-Docker)
+### Backend
+1) Python 3.10+ recommended.  
+2) Install deps:
 ```
 pip install -r backend/requirements.txt
 ```
-2) (Optional) Set depth model path/URL:
+   Optional GPU extras (matching Dockerfile):
 ```
-export DEPTH_ANYTHING_MODEL=models/depth_anything_v2_small.onnx
-export DEPTH_ANYTHING_URL=https://huggingface.co/LiheYoung/Depth-Anything-V2-Small/resolve/main/depth_anything_v2_small.onnx
+pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu117
+pip install onnxruntime-gpu==1.16.3
 ```
-3) Run backend:
+3) (Optional) override depth model path:
+```
+set DEPTH_MODEL_PATH=backend/models/depth_anything_v2_small.onnx
+```
+   If missing, the ONNX model is downloaded automatically; offline mode falls back to edge-based depth.  
+4) Run:
 ```
 python -m backend.app
 ```
-The app serves `/api` and static outputs at `/outputs`.
+   Serves REST/WebSocket at `http://localhost:8000` and static outputs at `/outputs`.
 
-### Frontend notes
-- Use Vite proxy in dev; set `VITE_API_TARGET` / `VITE_WS_TARGET` in prod to point to the backend host.
-- Download buttons expect `/outputs/{job_id}/...` URLs returned by the API.
+### Frontend
+1) Node 18+ recommended.  
+2) Install and run:
+```
+cd frontend
+npm install
+npm run dev
+```
+   - Dev proxy targets `http://localhost:8000` by default.  
+   - For remote/prod, set `VITE_API_TARGET` and `VITE_WS_TARGET` to the backend host.
 
-### Next improvements (research-friendly)
-- Swap stub texture bake with a real UV unwrap + multi-view projection.
-- Optional GPU path: replace depth with a larger model or Fast3R when a CUDA box is available.
-- Add retention/cleanup policy for outputs and temps.
+## Docker / Compose
+- Build and run both services:
+```
+docker-compose up --build
+```
+- Ports: backend `8000`, frontend `5173`. Outputs persist in the `backend_outputs` volume.
 
+## Outputs
+- Files are written to `backend/outputs/{job_id}`:
+  - `model.glb` — holographic GLB
+  - `model.splat` — Gaussian splat placeholder (copied point cloud)
+  - `pointcloud.ply` — colored sparse cloud
+- Returned URLs map to the same paths under `/outputs/{job_id}/...`.
+
+## Repository Layout
+- `backend/app.py` — FastAPI entrypoint, job orchestration, WebSockets.
+- `backend/pipelines/` — quality-specific pipelines using shared core components.
+- `backend/core/` — keyframes, depth, reconstruction, Gaussian splatting placeholder, meshing, texture/GLB baker, exporter.
+- `frontend/` — React/Vite client with upload, progress, and viewer components.
+- `docker-compose.yml` — dev orchestration; `backend/Dockerfile`, `frontend/Dockerfile`.
+
+## Notes & Limitations
+- Reconstruction assumes a turntable-style capture (camera orbit around subject); arbitrary trajectories may degrade quality.
+- Gaussian splatting and texturing are simplified placeholders; GLB is holographic, not photorealistic.
+- Depth model download requires internet on first run; offline runs will use the edge-based fallback.
+- No automated test suite is included yet.
