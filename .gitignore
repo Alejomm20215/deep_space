@@ -1,0 +1,51 @@
+# System Files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Node.js / Frontend
+node_modules/
+frontend/node_modules/
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
+frontend/dist/
+frontend/.eslintcache
+frontend/coverage/
+
+# Python / Backend
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Application Specific (Generated/Temp Files)
+backend/temp_uploads/
+backend/temp_processing/
+backend/outputs/*
+!backend/outputs/.gitkeep
+temp_uploads/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
