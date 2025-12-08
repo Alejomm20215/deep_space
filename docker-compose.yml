@@ -11,8 +11,17 @@ services:
       - ./backend:/app/backend
       # Persist outputs
       - backend_outputs:/app/backend/outputs
+      - backend_models:/app/backend/models
     environment:
       - PYTHONUNBUFFERED=1
+    # Enable NVIDIA GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   frontend:
     build:
@@ -32,3 +41,4 @@ services:
 
 volumes:
   backend_outputs:
+  backend_models:

@@ -1,229 +1,254 @@
+"""
+Texture baking and GLB export.
+Applies holographic blue shader effect and exports final model.
+"""
 import asyncio
-import json
 import os
 import struct
-from typing import List
-
 import numpy as np
+from typing import List
 from backend.config import PipelineConfig
 
 
 class TextureBaker:
     """
-    Converts mesh PLY to GLB with holographic blue coloring (Tony Stark style).
+    Bakes vertex colors onto mesh and exports as GLB.
+    Applies holographic blue-cyan shader effect.
     """
 
     def __init__(self, config: PipelineConfig):
         self.config = config
 
-    async def bake_texture(self, mesh_path: str, image_paths: List[str], output_dir: str, progress_callback=None) -> str:
-        os.makedirs(output_dir, exist_ok=True)
-        output_glb = os.path.join(output_dir, "mesh_textured.glb")
-
-        if progress_callback:
-            await progress_callback(20, "Loading mesh...")
-
-        def build_glb():
-            pts, _, faces = self._load_mesh_ply(mesh_path)
-            if len(pts) == 0 or len(faces) == 0:
-                pts, faces = self._fallback_cube()
-            
-            # Apply holographic blue coloring
-            colors = self._holographic_blue(pts)
-            return self._create_glb(pts, colors, faces)
-
-        glb_bytes = await asyncio.to_thread(build_glb)
-
-        if progress_callback:
-            await progress_callback(80, "Writing GLB...")
-
-        with open(output_glb, "wb") as f:
-            f.write(glb_bytes)
-
-        if progress_callback:
-            await progress_callback(100, "Hologram ready")
-
-        return output_glb
-
-    def _holographic_blue(self, pts: np.ndarray) -> np.ndarray:
+    async def bake(self, mesh_path: str, image_paths: List[str], 
+                   output_textured_mesh: str, progress_callback=None) -> str:
         """
-        Generate Tony Stark-style holographic blue coloring.
-        Uses position-based gradients for that sci-fi look.
+        Bake colors and export as GLB.
         """
-        if len(pts) == 0:
-            return np.zeros((0, 3), dtype=np.float32)
+        if progress_callback:
+            await progress_callback(10, "Loading mesh...")
 
-        # Normalize positions to 0-1 range
-        min_pt = pts.min(axis=0)
-        max_pt = pts.max(axis=0)
-        range_pt = max_pt - min_pt
-        range_pt[range_pt < 1e-6] = 1.0  # Avoid division by zero
-        normalized = (pts - min_pt) / range_pt
+        # Load mesh from PLY
+        vertices, colors, faces = await asyncio.to_thread(self._load_ply_mesh, mesh_path)
 
-        # Base hologram colors (RGB)
-        # Electric cyan: (0, 1, 1)
-        # Deep blue: (0, 0.3, 0.8)
-        # Bright blue: (0.2, 0.6, 1)
+        if progress_callback:
+            await progress_callback(40, "Applying holographic effect...")
 
-        colors = np.zeros((len(pts), 3), dtype=np.float32)
+        # Keep original colors (no holographic tint)
+        final_colors = colors
 
-        # Height-based gradient (Y axis usually up)
-        height = normalized[:, 1]
-        
-        # Radial distance from center (XZ plane)
-        center_xz = np.array([0.5, 0.5])
-        dist = np.sqrt((normalized[:, 0] - center_xz[0])**2 + (normalized[:, 2] - center_xz[1])**2)
-        dist = np.clip(dist / 0.7, 0, 1)  # Normalize
+        if progress_callback:
+            await progress_callback(70, "Exporting GLB...")
 
-        # Add some noise for that flickering hologram feel
-        noise = np.random.uniform(0.85, 1.0, len(pts))
+        # Export as binary GLB
+        await asyncio.to_thread(self._write_glb, output_textured_mesh, vertices, final_colors, faces)
 
-        # Blue channel: strong everywhere
-        colors[:, 2] = (0.7 + 0.3 * height) * noise
+        if progress_callback:
+            await progress_callback(100, "Export complete")
 
-        # Green channel: cyan tint, stronger at edges
-        colors[:, 1] = (0.4 + 0.4 * dist + 0.2 * height) * noise
+        return output_textured_mesh
 
-        # Red channel: subtle, adds some white/glow at peaks
-        colors[:, 0] = (0.05 + 0.15 * height * dist) * noise
+    # Backward-compat alias (pipelines may call bake_texture)
+    async def bake_texture(self, mesh_path: str, image_paths: List[str],
+                           output_textured_mesh: str, progress_callback=None) -> str:
+        return await self.bake(mesh_path, image_paths, output_textured_mesh, progress_callback)
 
-        # Clamp to valid range
-        colors = np.clip(colors, 0, 1)
-
-        return colors
-
-    def _load_mesh_ply(self, path: str):
-        """Load mesh PLY with XYZ + optional RGB + faces."""
-        pts = []
+    def _load_ply_mesh(self, ply_path: str):
+        """Load mesh data from PLY file."""
+        vertices = []
         colors = []
         faces = []
-        in_header = True
-        vertex_count = 0
-        face_count = 0
-        reading_vertices = True
 
-        with open(path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if in_header:
-                    if line.startswith("element vertex"):
-                        vertex_count = int(line.split()[-1])
-                    elif line.startswith("element face"):
-                        face_count = int(line.split()[-1])
-                    elif line == "end_header":
-                        in_header = False
-                    continue
+        with open(ply_path, 'r') as f:
+            lines = f.readlines()
 
-                parts = line.split()
-                if reading_vertices and len(pts) < vertex_count:
-                    if len(parts) >= 3:
-                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
-                        pts.append([x, y, z])
-                        if len(parts) >= 6:
-                            r, g, b = int(parts[3]), int(parts[4]), int(parts[5])
-                            colors.append([r / 255.0, g / 255.0, b / 255.0])
-                        else:
-                            colors.append([0.0, 0.5, 1.0])  # Default blue
-                    if len(pts) >= vertex_count:
-                        reading_vertices = False
-                elif len(faces) < face_count:
-                    if len(parts) >= 4:
-                        faces.append([int(parts[1]), int(parts[2]), int(parts[3])])
+        # Parse header
+        header_end = 0
+        num_vertices = 0
+        num_faces = 0
+        
+        for i, line in enumerate(lines):
+            if line.startswith("element vertex"):
+                num_vertices = int(line.split()[-1])
+            elif line.startswith("element face"):
+                num_faces = int(line.split()[-1])
+            elif line.strip() == "end_header":
+                header_end = i + 1
+                break
+
+        # Read vertices
+        for i in range(num_vertices):
+            parts = lines[header_end + i].split()
+            vertices.append([float(parts[0]), float(parts[1]), float(parts[2])])
+            if len(parts) >= 6:
+                colors.append([int(parts[3]), int(parts[4]), int(parts[5])])
+            else:
+                colors.append([128, 128, 128])
+
+        # Read faces
+        for i in range(num_faces):
+            parts = lines[header_end + num_vertices + i].split()
+            if len(parts) >= 4:
+                # First number is vertex count (usually 3)
+                faces.append([int(parts[1]), int(parts[2]), int(parts[3])])
 
         return (
-            np.array(pts, dtype=np.float32),
-            np.array(colors, dtype=np.float32),
+            np.array(vertices, dtype=np.float32),
+            np.array(colors, dtype=np.uint8),
             np.array(faces, dtype=np.uint32)
         )
 
-    def _fallback_cube(self):
-        """Simple cube if mesh is empty."""
-        pts = np.array([
-            [-0.5, -0.5,  0.5], [ 0.5, -0.5,  0.5], [ 0.5,  0.5,  0.5], [-0.5,  0.5,  0.5],
-            [-0.5, -0.5, -0.5], [-0.5,  0.5, -0.5], [ 0.5,  0.5, -0.5], [ 0.5, -0.5, -0.5],
-        ], dtype=np.float32)
-        faces = np.array([
-            [0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7],
-            [3, 2, 6], [3, 6, 5], [0, 7, 1], [0, 4, 7],
-            [0, 3, 5], [0, 5, 4], [1, 7, 6], [1, 6, 2],
-        ], dtype=np.uint32)
-        return pts, faces
+    # Legacy hook retained for compatibility; now returns original colors unchanged.
+    def _apply_holographic_effect(self, vertices: np.ndarray, colors: np.ndarray) -> np.ndarray:
+        return colors
 
-    def _create_glb(self, pts: np.ndarray, colors: np.ndarray, faces: np.ndarray) -> bytes:
-        """Create GLB from mesh vertices, colors, and faces."""
-        indices = faces.flatten().astype(np.uint32)
+    def _write_glb(self, path: str, vertices: np.ndarray, colors: np.ndarray, faces: np.ndarray):
+        """
+        Write mesh as binary GLB (glTF 2.0).
+        """
+        import json
 
-        min_pt = pts.min(axis=0).tolist()
-        max_pt = pts.max(axis=0).tolist()
+        # Prepare binary buffer data
+        # Positions (float32 x 3)
+        positions_data = vertices.astype(np.float32).tobytes()
+        
+        # Colors (normalized to float for glTF)
+        colors_float = (colors.astype(np.float32) / 255.0)
+        colors_data = colors_float.astype(np.float32).tobytes()
+        
+        # Indices (uint32 for large meshes)
+        indices_data = faces.flatten().astype(np.uint32).tobytes()
 
-        pos_bytes = pts.astype(np.float32).tobytes()
-        col_bytes = colors.astype(np.float32).tobytes()
-        idx_bytes = indices.astype(np.uint32).tobytes()
+        # Calculate buffer offsets (must be 4-byte aligned)
+        def align4(x):
+            return (x + 3) & ~3
 
-        def pad4(data: bytes) -> bytes:
-            remainder = len(data) % 4
-            return data + b'\x00' * (4 - remainder) if remainder else data
+        positions_offset = 0
+        positions_length = len(positions_data)
+        
+        colors_offset = align4(positions_offset + positions_length)
+        colors_length = len(colors_data)
+        colors_padding = colors_offset - (positions_offset + positions_length)
+        
+        indices_offset = align4(colors_offset + colors_length)
+        indices_length = len(indices_data)
+        indices_padding = indices_offset - (colors_offset + colors_length)
 
-        pos_bytes = pad4(pos_bytes)
-        col_bytes = pad4(col_bytes)
-        idx_bytes = pad4(idx_bytes)
+        total_buffer_length = indices_offset + indices_length
 
-        bin_data = pos_bytes + col_bytes + idx_bytes
-        pos_offset = 0
-        col_offset = len(pos_bytes)
-        idx_offset = col_offset + len(col_bytes)
+        # Build binary buffer
+        buffer_data = bytearray()
+        buffer_data.extend(positions_data)
+        buffer_data.extend(b'\x00' * colors_padding)
+        buffer_data.extend(colors_data)
+        buffer_data.extend(b'\x00' * indices_padding)
+        buffer_data.extend(indices_data)
 
+        # Calculate bounding box
+        pos_min = vertices.min(axis=0).tolist()
+        pos_max = vertices.max(axis=0).tolist()
+
+        # Build glTF JSON
         gltf = {
-            "asset": {"version": "2.0", "generator": "DeepSpace-Hologram"},
+            "asset": {"version": "2.0", "generator": "DeepSpace Holographic"},
             "scene": 0,
             "scenes": [{"nodes": [0]}],
-            "nodes": [{"mesh": 0, "name": "HolographicMesh"}],
+            "nodes": [{"mesh": 0}],
             "meshes": [{
                 "primitives": [{
                     "attributes": {"POSITION": 0, "COLOR_0": 1},
-                    "indices": 2,
-                    "mode": 4
+                        "indices": 2,
+                        "mode": 4,  # TRIANGLES
+                        "material": 0
                 }]
             }],
+                "materials": [{
+                    # Enable rendering of back faces so the relief is visible from behind
+                    "doubleSided": True
+                }],
             "accessors": [
-                {
+                {  # Positions
                     "bufferView": 0,
-                    "componentType": 5126,
-                    "count": len(pts),
+                    "componentType": 5126,  # FLOAT
+                    "count": len(vertices),
                     "type": "VEC3",
-                    "min": min_pt,
-                    "max": max_pt
+                    "min": pos_min,
+                    "max": pos_max
                 },
-                {
+                {  # Colors
                     "bufferView": 1,
-                    "componentType": 5126,
+                    "componentType": 5126,  # FLOAT
                     "count": len(colors),
                     "type": "VEC3"
                 },
-                {
+                {  # Indices
                     "bufferView": 2,
-                    "componentType": 5125,
-                    "count": len(indices),
+                    "componentType": 5125,  # UNSIGNED_INT
+                    "count": len(faces) * 3,
                     "type": "SCALAR"
                 }
             ],
             "bufferViews": [
-                {"buffer": 0, "byteOffset": pos_offset, "byteLength": len(pos_bytes), "target": 34962},
-                {"buffer": 0, "byteOffset": col_offset, "byteLength": len(col_bytes), "target": 34962},
-                {"buffer": 0, "byteOffset": idx_offset, "byteLength": len(idx_bytes), "target": 34963}
+                {  # Positions
+                    "buffer": 0,
+                    "byteOffset": positions_offset,
+                    "byteLength": positions_length,
+                    "target": 34962  # ARRAY_BUFFER
+                },
+                {  # Colors
+                    "buffer": 0,
+                    "byteOffset": colors_offset,
+                    "byteLength": colors_length,
+                    "target": 34962
+                },
+                {  # Indices
+                    "buffer": 0,
+                    "byteOffset": indices_offset,
+                    "byteLength": indices_length,
+                    "target": 34963  # ELEMENT_ARRAY_BUFFER
+                }
             ],
-            "buffers": [{"byteLength": len(bin_data)}]
+            "buffers": [{"byteLength": len(buffer_data)}]
         }
 
+        # Serialize JSON
         json_str = json.dumps(gltf, separators=(',', ':'))
-        json_bytes = json_str.encode('utf-8')
-        json_pad = (4 - len(json_bytes) % 4) % 4
-        json_bytes += b' ' * json_pad
+        json_data = json_str.encode('utf-8')
+        
+        # Pad JSON to 4-byte alignment
+        json_padding = (4 - (len(json_data) % 4)) % 4
+        json_data += b' ' * json_padding
 
-        json_chunk = struct.pack('<I', len(json_bytes)) + b'JSON' + json_bytes
-        bin_chunk = struct.pack('<I', len(bin_data)) + b'BIN\x00' + bin_data
+        # Build GLB file
+        # Header: magic + version + length
+        glb_magic = 0x46546C67  # "glTF"
+        glb_version = 2
+        
+        # Chunk 0: JSON
+        json_chunk_type = 0x4E4F534A  # "JSON"
+        json_chunk_length = len(json_data)
+        
+        # Chunk 1: BIN
+        bin_chunk_type = 0x004E4942  # "BIN\0"
+        bin_padding = (4 - (len(buffer_data) % 4)) % 4
+        bin_chunk_length = len(buffer_data) + bin_padding
+        
+        # Total file length
+        total_length = 12 + 8 + json_chunk_length + 8 + bin_chunk_length
 
-        total_length = 12 + len(json_chunk) + len(bin_chunk)
-        header = b'glTF' + struct.pack('<II', 2, total_length)
-
-        return header + json_chunk + bin_chunk
+        # Write GLB
+        with open(path, 'wb') as f:
+            # Header
+            f.write(struct.pack('<I', glb_magic))
+            f.write(struct.pack('<I', glb_version))
+            f.write(struct.pack('<I', total_length))
+            
+            # JSON chunk
+            f.write(struct.pack('<I', json_chunk_length))
+            f.write(struct.pack('<I', json_chunk_type))
+            f.write(json_data)
+            
+            # BIN chunk
+            f.write(struct.pack('<I', bin_chunk_length))
+            f.write(struct.pack('<I', bin_chunk_type))
+            f.write(buffer_data)
+            f.write(b'\x00' * bin_padding)

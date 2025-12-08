@@ -3,7 +3,7 @@ fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 websockets>=12.0
-numpy>=1.26.0
+numpy>=1.26.0,<2.0
 opencv-python-headless>=4.9.0
 tqdm>=4.66.0
 # torch>=2.2.0 --index-url https://download.pytorch.org/whl/cu121
@@ -12,6 +12,5 @@ pygltflib>=1.16.0
 scipy>=1.11.0
 Pillow>=10.2.0
 plyfile>=1.0.0
-# Core ML dependencies (placeholders - would be installed from specific repos)
-# git+https://github.com/facebookresearch/fast3r.git
-# gsplat>=0.1.0
+# Fast3R installed separately in Dockerfile (requires setup.py fix)
+# See Dockerfile for details

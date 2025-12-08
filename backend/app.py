@@ -182,6 +182,13 @@ async def get_result(job_id: str):
         raise HTTPException(status_code=400, detail="Job not complete")
     return jobs[job_id].get("result", {})
 
+
+@app.get("/api/gpu-status")
+async def get_gpu_status():
+    """Check GPU availability for CUDA acceleration."""
+    from backend.core.depth_estimator import check_gpu_status
+    return check_gpu_status()
+
 if __name__ == "__main__":
     # Use fully-qualified module path when run in a package context
     uvicorn.run("backend.app:app", host="0.0.0.0", port=8000, reload=False)

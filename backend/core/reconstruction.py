@@ -1,181 +1,324 @@
 """
-3D Reconstruction from multi-view images.
-Uses Depth Anything V2 for depth estimation.
-Assumes turntable-style capture (camera orbits around object).
+3D Reconstruction from images.
+Uses Depth Anything V2 for high-quality depth estimation.
+Creates dense 2.5D relief mesh from best image.
 """
 import asyncio
 import os
-import math
 from typing import List, Dict, Any
 
 import cv2
 import numpy as np
 from backend.config import PipelineConfig
 from backend.core.depth_estimator import get_depth_estimator
+from backend.core.pose_estimator import PoseEstimator
+from backend.core.fast3r_runner import Fast3RRunner
 
 
 class Fast3RReconstructor:
     """
-    Multi-view reconstruction:
-    1. Estimate depth for each image using AI
-    2. Assume turntable camera positions (evenly spaced around object)
-    3. Unproject to 3D and merge point clouds
+    High-quality 3D reconstruction using AI depth estimation.
+    Now supports multi-view with lightweight pose estimation (OpenCV E-matrix).
     """
 
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.depth_estimator = None
+        self.pose_estimator = PoseEstimator()
+        self.fast3r_runner = None
 
     def _get_depth_estimator(self):
         if self.depth_estimator is None:
-            self.depth_estimator = get_depth_estimator()
+            self.depth_estimator = get_depth_estimator(use_refinement=True)
         return self.depth_estimator
 
+    def _get_fast3r_runner(self):
+        if self.fast3r_runner is None:
+            self.fast3r_runner = Fast3RRunner()
+        return self.fast3r_runner
+
     async def reconstruct(self, image_paths: List[str], output_dir: str, progress_callback=None) -> Dict[str, Any]:
+        """
+        Reconstruct 3D model from images.
+        - Multi-view: estimate poses with OpenCV (E-matrix), depth per view, fuse meshes.
+        - Single-image fallback: dense 2.5D relief.
+        """
         os.makedirs(output_dir, exist_ok=True)
 
-        num_images = len(image_paths)
-        if num_images == 0:
+        if len(image_paths) == 0:
             raise RuntimeError("No images provided.")
 
-        all_points = []
-        all_colors = []
+        if len(image_paths) == 1:
+            return await self._single_image_relief(image_paths[0], output_dir, progress_callback)
+
+        poses = None
+        K = None
+
+        # Try Fast3R poses first (if installed)
+        try:
+            fr = self._get_fast3r_runner()
+            if progress_callback:
+                await progress_callback(6, "Estimating poses with Fast3R...")
+            poses, K = await asyncio.to_thread(fr.estimate_poses, image_paths)
+        except Exception as e:
+            print(f"[Fast3R] Pose estimation failed or unavailable: {e}")
+
+        # Fallback to lightweight OpenCV pose estimator
+        if poses is None or K is None:
+            if progress_callback:
+                await progress_callback(8, "Estimating poses (OpenCV)...")
+            poses, K = await asyncio.to_thread(self.pose_estimator.estimate, image_paths)
+
+        estimator = self._get_depth_estimator()
+        all_vertices, all_colors, all_faces = [], [], []
+        v_offset = 0
 
         for idx, img_path in enumerate(image_paths):
             if progress_callback:
-                await progress_callback(
-                    int((idx / num_images) * 70),
-                    f"Processing image {idx + 1}/{num_images}"
-                )
+                await progress_callback(12 + int(idx / max(len(image_paths), 1) * 40), f"Depth {idx+1}/{len(image_paths)}")
 
-            pts, clr = await asyncio.to_thread(
-                self._process_single_image,
-                img_path,
-                idx,
-                num_images
+            img = cv2.imread(img_path)
+            if img is None:
+                continue
+
+            h, w = img.shape[:2]
+            max_dim = 900
+            scale = max_dim / max(h, w)
+            if scale < 1.0:
+                img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+
+            depth = await asyncio.to_thread(estimator.estimate, img, True)
+
+            verts, cols, faces = await asyncio.to_thread(
+                self._create_dense_relief_multiview,
+                img, depth, K, poses[idx]
             )
 
-            if pts is not None and len(pts) > 0:
-                all_points.append(pts)
-                all_colors.append(clr)
+            faces = faces + v_offset
+            v_offset += len(verts)
 
-        if not all_points:
-            raise RuntimeError("No valid images for reconstruction.")
+            all_vertices.append(verts)
+            all_colors.append(cols)
+            all_faces.append(faces)
 
-        # Merge all point clouds
-        merged_pts = np.concatenate(all_points, axis=0)
-        merged_clr = np.concatenate(all_colors, axis=0)
+        if not all_vertices:
+            return await self._single_image_relief(image_paths[0], output_dir, progress_callback)
 
-        # Subsample if too many points
-        max_points = 200000
-        if len(merged_pts) > max_points:
-            indices = np.random.choice(len(merged_pts), max_points, replace=False)
-            merged_pts = merged_pts[indices]
-            merged_clr = merged_clr[indices]
+        vertices = np.concatenate(all_vertices, axis=0)
+        colors = np.concatenate(all_colors, axis=0)
+        faces = np.concatenate(all_faces, axis=0)
 
         if progress_callback:
-            await progress_callback(80, "Writing point cloud...")
+            await progress_callback(80, "Writing output...")
 
-        # Center the point cloud
-        centroid = merged_pts.mean(axis=0)
-        merged_pts = merged_pts - centroid
-
-        # Scale to unit box
-        scale = np.abs(merged_pts).max()
-        if scale > 1e-6:
-            merged_pts = merged_pts / scale * 0.5
-
-        # Write PLY
         ply_path = os.path.join(output_dir, "sparse_pc.ply")
-        await asyncio.to_thread(self._write_ply, ply_path, merged_pts, merged_clr)
+        await asyncio.to_thread(self._write_mesh_ply, ply_path, vertices, colors, faces)
 
-        # Write dummy poses
         poses_path = os.path.join(output_dir, "poses.npy")
-        np.save(poses_path, np.eye(4, dtype=np.float32))
+        np.save(poses_path, np.stack(poses, axis=0))
 
         if progress_callback:
-            await progress_callback(90, f"Point cloud: {len(merged_pts)} points")
+            await progress_callback(95, f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
         return {
             "point_cloud": ply_path,
             "poses": poses_path,
-            "point_count": len(merged_pts)
+            "point_count": len(vertices),
+            "face_count": len(faces)
         }
 
-    def _process_single_image(self, img_path: str, img_idx: int, total_images: int):
-        """Process one image: depth estimate + unproject to 3D."""
-        img = cv2.imread(img_path)
-        if img is None:
-            return None, None
+    async def _single_image_relief(self, image_path: str, output_dir: str, progress_callback=None):
+        if progress_callback:
+            await progress_callback(15, "Loading image...")
 
-        # Resize for speed
+        img = cv2.imread(image_path)
+        if img is None:
+            raise RuntimeError(f"Failed to load image: {image_path}")
+
         h, w = img.shape[:2]
-        max_dim = 512
+        max_dim = 1024
         scale = max_dim / max(h, w)
         if scale < 1.0:
-            img = cv2.resize(img, (int(w * scale), int(h * scale)))
-            h, w = img.shape[:2]
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
 
-        # Estimate depth
         estimator = self._get_depth_estimator()
-        depth = estimator.estimate(img)
+        depth = await asyncio.to_thread(estimator.estimate, img, True)
 
-        # Camera intrinsics (approximate)
-        fx = fy = max(h, w) * 0.8
-        cx, cy = w / 2.0, h / 2.0
+        if progress_callback:
+            await progress_callback(60, "Creating 3D mesh...")
 
-        # Turntable camera pose: rotate around Y axis
-        # Assume images are taken in a circle looking at center
-        angle = (img_idx / total_images) * 2 * math.pi
-        radius = 1.5  # Distance from object center
+        vertices, colors, faces = await asyncio.to_thread(
+            self._create_dense_relief_single,
+            img, depth
+        )
 
-        # Camera position on circle
-        cam_x = radius * math.sin(angle)
-        cam_z = radius * math.cos(angle)
-        cam_y = 0.0
+        if progress_callback:
+            await progress_callback(80, "Writing output...")
 
-        # Camera looks toward origin
-        # Rotation matrix: camera Z points toward origin
-        forward = np.array([-cam_x, -cam_y, -cam_z])
-        forward = forward / (np.linalg.norm(forward) + 1e-8)
-        up = np.array([0, 1, 0])
-        right = np.cross(forward, up)
-        right = right / (np.linalg.norm(right) + 1e-8)
-        up = np.cross(right, forward)
+        ply_path = os.path.join(output_dir, "sparse_pc.ply")
+        await asyncio.to_thread(self._write_mesh_ply, ply_path, vertices, colors, faces)
 
-        R = np.stack([right, -up, forward], axis=1)  # 3x3 rotation
-        t = np.array([cam_x, cam_y, cam_z])  # translation
+        poses_path = os.path.join(output_dir, "poses.npy")
+        np.save(poses_path, np.eye(4, dtype=np.float32))
 
-        # Unproject pixels to 3D
-        step = 2  # Sample every 2 pixels for speed
+        if progress_callback:
+            await progress_callback(95, f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
+
+        return {
+            "point_cloud": ply_path,
+            "poses": poses_path,
+            "point_count": len(vertices),
+            "face_count": len(faces)
+        }
+
+    def _select_best_image(self, image_paths: List[str]) -> str:
+        """
+        Select the best image based on sharpness and size.
+        """
+        best_path = image_paths[0]
+        best_score = -1
+
+        for path in image_paths:
+            img = cv2.imread(path)
+            if img is None:
+                continue
+
+            # Score = resolution * sharpness
+            h, w = img.shape[:2]
+            resolution_score = h * w
+
+            # Laplacian variance = sharpness measure
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            sharpness = laplacian.var()
+
+            score = resolution_score * (1 + sharpness / 1000)
+
+            if score > best_score:
+                best_score = score
+                best_path = path
+
+        return best_path
+
+    def _create_dense_relief_single(self, img: np.ndarray, depth: np.ndarray):
+        """Create dense 2.5D relief mesh from one image/depth."""
+        h, w = img.shape[:2]
+
+        # Use every pixel for maximum quality
+        # For very large images, subsample slightly
+        step = 1 if h * w < 500000 else 2
+
+        # Create grid of vertices
         ys, xs = np.mgrid[0:h:step, 0:w:step]
+        grid_h, grid_w = ys.shape
+
+        # Get depth values
         zs = depth[ys, xs]
 
-        # Filter out very close/far depths
-        mask = (zs > 0.05) & (zs < 0.95)
-        ys, xs, zs = ys[mask], xs[mask], zs[mask]
+        # Normalize coordinates to [-0.5, 0.5] range
+        x_norm = (xs.astype(np.float32) / w - 0.5)
+        y_norm = -(ys.astype(np.float32) / h - 0.5)  # Flip Y for 3D
 
-        # Depth to actual distance (invert and scale)
-        # Depth map: 0 = close, 1 = far -> convert to actual depth
-        actual_depth = 0.2 + zs * 1.0  # Range 0.2 to 1.2 meters
+        # Depth scaling: invert so foreground pops outward
+        # Use 0.3 as depth scale for noticeable but not extreme relief
+        depth_scale = 0.3
+        z_norm = (0.5 - zs) * depth_scale
 
-        # Unproject to camera space
-        x_cam = (xs - cx) * actual_depth / fx
-        y_cam = (ys - cy) * actual_depth / fy
-        z_cam = actual_depth
+        # Stack into vertices (N, 3)
+        vertices = np.stack([
+            x_norm.flatten(),
+            y_norm.flatten(),
+            z_norm.flatten()
+        ], axis=-1).astype(np.float32)
 
-        pts_cam = np.stack([x_cam, -y_cam, -z_cam], axis=-1)  # Flip Y and Z for OpenGL convention
+        # Get colors (RGB normalized)
+        colors = img[ys, xs][:, :, ::-1].reshape(-1, 3) / 255.0
+        colors = colors.astype(np.float32)
 
-        # Transform to world space
-        pts_world = pts_cam @ R.T + t
+        # Create triangle faces (2 triangles per quad)
+        faces = []
+        for i in range(grid_h - 1):
+            for j in range(grid_w - 1):
+                # Vertex indices
+                v00 = i * grid_w + j
+                v01 = i * grid_w + (j + 1)
+                v10 = (i + 1) * grid_w + j
+                v11 = (i + 1) * grid_w + (j + 1)
 
-        # Get colors
-        colors = img[ys, xs][:, ::-1] / 255.0  # BGR to RGB, normalize
+                # Two triangles per quad
+                faces.append([v00, v10, v01])  # Lower-left triangle
+                faces.append([v01, v10, v11])  # Upper-right triangle
 
-        return pts_world.reshape(-1, 3).astype(np.float32), colors.reshape(-1, 3).astype(np.float32)
+        faces = np.array(faces, dtype=np.int32)
+
+        return vertices, colors, faces
+
+    def _create_dense_relief_multiview(self, img: np.ndarray, depth: np.ndarray,
+                                       K: np.ndarray, pose_c2w: np.ndarray):
+        """Create dense mesh for one view and place it in world coordinates using pose."""
+        h, w = img.shape[:2]
+
+        step = 1 if h * w < 500000 else 2
+        ys, xs = np.mgrid[0:h:step, 0:w:step]
+        grid_h, grid_w = ys.shape
+
+        zs = depth[ys, xs]
+
+        fx, fy = K[0, 0], K[1, 1]
+        cx, cy = K[0, 2], K[1, 2]
+        x_cam = (xs - cx) * zs / fx
+        y_cam = (ys - cy) * zs / fy
+        z_cam = zs
+
+        pts_cam = np.stack([x_cam, -y_cam, z_cam], axis=-1).reshape(-1, 3).astype(np.float32)
+
+        R = pose_c2w[:3, :3]
+        t = pose_c2w[:3, 3]
+        pts_world = (pts_cam @ R.T) + t
+
+        colors = img[ys, xs][:, :, ::-1].reshape(-1, 3) / 255.0
+
+        faces = []
+        for i in range(grid_h - 1):
+            for j in range(grid_w - 1):
+                v00 = i * grid_w + j
+                v01 = i * grid_w + (j + 1)
+                v10 = (i + 1) * grid_w + j
+                v11 = (i + 1) * grid_w + (j + 1)
+                faces.append([v00, v10, v01])
+                faces.append([v01, v10, v11])
+        faces = np.array(faces, dtype=np.int32)
+
+        return pts_world, colors.astype(np.float32), faces
+
+    def _write_mesh_ply(self, path: str, vertices: np.ndarray, colors: np.ndarray, faces: np.ndarray):
+        """Write mesh as PLY with vertices, colors, and faces."""
+        colors_uint8 = (colors * 255).clip(0, 255).astype(np.uint8)
+
+        with open(path, 'w') as f:
+            f.write("ply\n")
+            f.write("format ascii 1.0\n")
+            f.write(f"element vertex {len(vertices)}\n")
+            f.write("property float x\n")
+            f.write("property float y\n")
+            f.write("property float z\n")
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+            f.write(f"element face {len(faces)}\n")
+            f.write("property list uchar int vertex_indices\n")
+            f.write("end_header\n")
+
+            # Write vertices
+            for v, c in zip(vertices, colors_uint8):
+                f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {c[0]} {c[1]} {c[2]}\n")
+
+            # Write faces
+            for face in faces:
+                f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
 
     def _write_ply(self, path: str, pts: np.ndarray, colors: np.ndarray):
-        """Write colored point cloud as PLY."""
+        """Write colored point cloud as PLY (legacy compatibility)."""
         colors_uint8 = (colors * 255).clip(0, 255).astype(np.uint8)
 
         with open(path, 'w') as f:

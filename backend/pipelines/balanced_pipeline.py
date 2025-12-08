@@ -1,3 +1,4 @@
+import os
 from backend.pipelines import BasePipeline
 
 class BalancedPipeline(BasePipeline):
@@ -29,19 +30,23 @@ class BalancedPipeline(BasePipeline):
         # 4. Mesh Extraction (SuGaR)
         await progress_callback("mesh", 50, "Extracting SuGaR Mesh...")
         mesh_dir = f"{self.output_dir}/mesh"
+        os.makedirs(mesh_dir, exist_ok=True)
+        mesh_path = os.path.join(mesh_dir, "mesh.ply")
         mesh_path = await self.mesher.extract_mesh(
-            splat_path, 
-            mesh_dir,
+            splat_path,
+            mesh_path,
             lambda p, msg: progress_callback("mesh", 50 + int(p * 0.2), msg)
         )
         
         # 5. Texture (Weighted Blend)
         await progress_callback("texture", 70, "Baking Weighted Texture...")
         tex_dir = f"{self.output_dir}/texture"
+        os.makedirs(tex_dir, exist_ok=True)
+        textured_path = os.path.join(tex_dir, "model.glb")
         textured_path = await self.baker.bake_texture(
-            mesh_path, 
-            image_paths, 
-            tex_dir,
+            mesh_path,
+            image_paths,
+            textured_path,
             lambda p, msg: progress_callback("texture", 70 + int(p * 0.2), msg)
         )
         
