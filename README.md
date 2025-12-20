@@ -1,142 +1,281 @@
-# Deep Space 3D – Reconstruction Service
+# Deep Space 3D (FastAPI + React) — Local 3D Reconstruction
 
-FastAPI + React/Vite service that turns a short video or a small set of images into downloadable 3D artifacts (GLB, SPLAT, PLY). The pipeline is CPU-first but can opportunistically use GPU acceleration when available.
+Convert **a short video** or **a set of images** into downloadable 3D artifacts (mesh + Gaussian splat), entirely **on your machine**.
 
-## Highlights
-- CPU-friendly pipeline with automatic fallbacks (no GPU required; CUDA used if available by ONNX).
-- Three quality presets (`fastest`, `balanced`, `quality`) tuned for speed vs. fidelity.
-- Background processing with WebSocket progress events and REST polling.
-- Browser-ready artifacts exposed at `/outputs/{job_id}/...` (served by FastAPI).
-- Depth model auto-download (Depth Anything V2 ONNX) with an edge-based fallback when offline.
-- Optional **true 3D Gaussian Splatting (3DGS)** training via a separate CUDA11.7 Docker trainer image (local-only).
-- Optional progressive training schedule (DashGaussian-style) with checkpoint resume to reduce wall time.
+This repo is built for:
+- **Local-only** workflows (no cloud)
+- **Reasonable defaults** that keep running even when parts fail (COLMAP / GPU / 3DGS trainer)
+- **Windows + Docker Desktop** friendliness
 
-## Architecture & Pipeline
-- **Backend:** FastAPI (`backend/app.py`) orchestrates pipelines and exposes REST + WebSocket endpoints.
-- **Frontend:** React/Vite app (`frontend/`) with proxying for `/api`, `/ws`, `/outputs`.
-- **Pipeline stages:**
-  1. Keyframe extraction from video or image folder (resized to preset resolutions).
-  2. Depth estimation via Depth Anything V2 ONNX (GPU if available); falls back to edge-based depth.
-  3. Sparse reconstruction with a turntable camera assumption → colored point cloud (`reconstruction.py`).
-  4. Gaussian splatting:
-     - **Fast fallback:** generate a renderable Gaussian PLY from point colors (no training)
-     - **True 3DGS (optional):** run graphdeco-inria 3DGS in a dedicated Docker container (CUDA 11.7)
-  5. Mesh extraction via SciPy Delaunay + filtering (`mesh_extraction.py`).
-  6. Texture/GLB generation as a holographic-style mesh (`texture_baker.py`).
-  7. Exporter copies artifacts to `backend/outputs/{job_id}` and returns HTTP URLs.
-  8. Metrics (`metrics.json`) + optional gzip splat + optional research compression hooks.
+---
 
-## Quality Presets (from `backend/config.py`)
-- **fastest** — 4 keyframes, skips 3DGS, quick Poisson-like mesh + simple texture. ~15–30s.
-- **balanced** — 8 keyframes, light 3DGS passthrough, filtered mesh, blended texture. ~45–90s.
-- **quality** — 16 keyframes, highest res/iterations, refined mesh, neural-blend texture. ~2–4m.
+## What this app outputs (important)
 
-## API Quick Reference
-- `POST /api/upload` — multipart `files` (one video _or_ multiple images), form `mode` = `fastest|balanced|quality` (default `balanced`). Returns `{ job_id }`.
-- `GET /api/status/{job_id}` — current stage/progress.
-- `GET /api/result/{job_id}` — artifact URLs after completion.
-- `WS /ws/{job_id}` — push events: `init`, `progress` (`stage`, `progress`, `detail`), `complete`, `error`.
-- Static files: `/outputs/{job_id}/model.glb`, `/model.splat`, `/pointcloud.ply`.
+- **`model.glb`**: a **mesh preview** intended to be browser-friendly.
+  - This is currently derived from **depth** and can look like a “depth relief” (front-facing geometry) on hard scenes.
+- **`model.splat.ply`**: the **Gaussian splat** output (download-only in the UI).
+  - **Preview is intentionally removed** from the UI because splat renderers can explode browser RAM.
+- **`pointcloud.ply`**: colored point cloud artifact (mostly for debugging / inspection)
+- **`metrics.json`**: sizes + counts + timing
 
-Example upload:
-```
-curl -X POST http://localhost:8000/api/upload ^
-  -F "files=@sample.mp4" ^
-  -F "mode=balanced"
-```
-Multiple images:
-```
-curl -X POST http://localhost:8000/api/upload ^
-  -F "files=@img1.jpg" -F "files=@img2.jpg" -F "files=@img3.jpg" ^
-  -F "mode=fastest"
+Outputs are served at:
+- `http://localhost:8000/outputs/<job_id>/...`
+
+---
+
+## Quickstart (Docker Compose — recommended)
+
+### Prerequisites
+- **Docker Desktop**
+- Optional: **NVIDIA GPU + NVIDIA Container Toolkit** (for GPU acceleration where available)
+
+### Run
+From repo root:
+
+```bash
+docker compose up -d --build
 ```
 
-## Running Locally (non-Docker)
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+
+### Windows note: HOST_PWD
+`docker-compose.yml` passes `HOST_PWD=${PWD}` so the backend (container) can correctly mount Windows paths when it launches sibling containers (COLMAP / 3DGS trainer).
+
+If `${PWD}` doesn’t expand in your shell:
+
+```powershell
+$env:PWD = (Get-Location).Path
+docker compose up -d --build
+```
+
+---
+
+## Quickstart (Local dev without Docker)
+
 ### Backend
-1) Python 3.10+ recommended.  
-2) Install deps:
-```
+- Python **3.10+**
+
+```bash
 pip install -r backend/requirements.txt
-```
-   Optional GPU extras (matching Dockerfile):
-```
-pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu117
-pip install onnxruntime-gpu==1.16.3
-```
-3) (Optional) override depth model path:
-```
-set DEPTH_MODEL_PATH=backend/models/depth_anything_v2_small.onnx
-```
-   If missing, the ONNX model is downloaded automatically; offline mode falls back to edge-based depth.  
-4) Run:
-```
 python -m backend.app
 ```
-   Serves REST/WebSocket at `http://localhost:8000` and static outputs at `/outputs`.
 
 ### Frontend
-1) Node 18+ recommended.  
-2) Install and run:
-```
+- Node **18+**
+
+```bash
 cd frontend
 npm install
 npm run dev
 ```
-   - Dev proxy targets `http://localhost:8000` by default.  
-   - For remote/prod, set `VITE_API_TARGET` and `VITE_WS_TARGET` to the backend host.
 
-## Docker / Compose
-- Build and run both services:
+---
+
+## Using the API (PowerShell-friendly)
+
+### Upload
+`POST /api/upload` with multipart form fields:
+- `files`: **one video** (`.mp4/.mov/.avi/.mkv`) OR **multiple images** (`.jpg/.jpeg/.png/.bmp`)
+- `mode`: `fastest | balanced | quality` (default `balanced`)
+
+Example (video):
+
+```powershell
+curl.exe -X POST http://localhost:8000/api/upload `
+  -F "files=@sample.mp4" `
+  -F "mode=balanced"
 ```
-docker-compose up --build
+
+Example (images):
+
+```powershell
+curl.exe -X POST http://localhost:8000/api/upload `
+  -F "files=@img1.jpg" -F "files=@img2.jpg" -F "files=@img3.jpg" -F "files=@img4.jpg" `
+  -F "mode=fastest"
 ```
-- Ports: backend `8000`, frontend `5173`. Outputs persist in the `backend_outputs` volume.
 
-## Outputs
-- Files are written to `backend/outputs/{job_id}`:
-  - `model.glb` — holographic GLB
-  - `model.splat.ply` — Gaussian splat PLY (renderable)
-  - `model.splat.ply.gz` — gzip-compressed splat (for storage/transfer)
-  - `pointcloud.ply` — colored sparse cloud
-  - `metrics.json` — counts/sizes/timing
-- Returned URLs map to the same paths under `/outputs/{job_id}/...`.
+### Progress + results
+- `WS /ws/{job_id}`: progress events (`init`, `progress`, `complete`, `error`)
+- `GET /api/status/{job_id}`: current stage/progress
+- `GET /api/result/{job_id}`: artifact URLs once done
 
-## True 3DGS Training (local, Docker)
-This project can run **real 3D Gaussian Splatting** training using a separate Docker image (so the API container stays small).
+---
 
-### 1) Install prerequisites
-- **Docker Desktop** (with NVIDIA GPU support enabled)
-- **COLMAP** available on PATH (for best results; otherwise pose estimation falls back to OpenCV)
+## Quality modes (what they actually do)
 
-### 2) Build the trainer image (once)
-From repo root:
-```
+Configured in `backend/config.py`:
+
+- **`fastest`**
+  - minimal frames
+  - no 3DGS training
+  - quickest mesh + texture
+- **`balanced`**
+  - more frames
+  - attempts COLMAP (Docker) poses; falls back to OpenCV if COLMAP fails
+  - attempts 3DGS training via trainer container (if enabled/available); otherwise falls back to lightweight splat
+- **`quality`**
+  - more frames + iterations
+  - higher compute/time
+
+Reality check: if your capture has low overlap, motion blur, glossy reflections, or low texture, COLMAP may fail and you’ll get OpenCV poses (lower quality). The pipeline still completes.
+
+---
+
+## Outputs (file list)
+
+Outputs are written to:
+- `backend/outputs/{job_id}/`
+
+Common files:
+- `model.glb`
+- `model.splat.ply`
+- `model.splat.ply.gz`
+- `pointcloud.ply`
+- `metrics.json`
+
+---
+
+## Pipeline overview (high level)
+
+1. **Keyframe extraction** (`backend/core/keyframe_extractor.py`)
+   - video → frames, or image directory → resized frames
+2. **Pose estimation**
+   - COLMAP (Docker) when possible
+   - OpenCV fallback when COLMAP fails
+3. **Depth estimation** (ONNX) + smoothing
+4. **Mesh preview** generation + decimation
+5. **Gaussian output**
+   - lightweight fallback, or
+   - trainer-container-based 3DGS
+6. **Export** + `metrics.json` + optional gzip
+
+---
+
+## Math / algorithms used (practical overview)
+
+This is a “what’s under the hood” summary of the main mathematical pieces used in the pipeline.
+
+### Camera + geometry basics
+- **Pinhole camera model**:
+  - Pixel projection (ignoring distortion): \(x \sim K [R \mid t] X\)
+  - \(K\) is intrinsics, \(R,t\) are pose, \(X\) is 3D point.
+  - In inhomogeneous image coordinates, with \(X_c = R X + t\): \((u, v) = \left(f_x \frac{X_c}{Z_c} + c_x,\; f_y \frac{Y_c}{Z_c} + c_y\right)\)
+
+### Pose estimation (two backends)
+- **COLMAP (SfM)** (when it succeeds):
+  - Feature detection + matching (SIFT-style), geometric verification, and **incremental Structure-from-Motion**
+  - Uses **bundle adjustment** (nonlinear least squares) to refine camera poses + 3D points by minimizing reprojection error:
+    \[
+      \min_{\{R_i,t_i,X_j\}} \sum_{(i,j)\in\mathcal{O}} \left\lVert \pi\!\left(K_i(R_i X_j + t_i)\right) - x_{ij} \right\rVert_2^2
+    \]
+- **OpenCV fallback** (when COLMAP fails):
+  - Pairwise epipolar geometry via the **Essential matrix** \(E\) with **RANSAC** outlier rejection
+  - Decomposes \(E\) to recover relative \(R,t\) up to scale (sufficient for our lightweight pipeline).
+  - Epipolar constraint (normalized image points): \(x'^T E x = 0\), with \(E = [t]_\times R\)
+
+### Depth processing (mesh preview path)
+- **Monocular depth estimation** (ONNX model): produces **relative depth** (not metric).
+- **Robust normalization + outlier clipping**:
+  - Normalize depth to \([0,1]\), clip extremes using quantiles (e.g., 2%–98%) to prevent “spikes”.
+- **Edge-preserving smoothing**:
+  - Uses a **bilateral filter** (spatial + range weighting) to reduce noise while keeping edges sharper than a blur.
+  - One common bilateral form:
+    \[
+      \hat{I}(p)=\frac{1}{W_p}\sum_{q\in\Omega} \exp\!\left(-\frac{\lVert p-q\rVert^2}{2\sigma_s^2}\right)\exp\!\left(-\frac{(I(p)-I(q))^2}{2\sigma_r^2}\right)I(q)
+    \]
+
+### Mesh construction + simplification
+- **Depth-to-mesh lifting**:
+  - Create a grid of vertices from pixels; convert depth \(z\) into a small relief displacement.
+- **Triangulation**:
+  - Uses **Delaunay triangulation** (via SciPy) for triangle connectivity in the generated surface.
+- **Decimation (size control)**:
+  - Uses **Quadric Error Metrics (QEM)** “quadratic decimation” (via `trimesh`) to reduce faces while preserving shape as much as possible.
+  - QEM idea: each vertex has a quadric \(Q\) (sum of plane quadrics), and collapsing to \(v\) minimizes:
+    \[
+      E(v) = v^T Q v
+    \]
+
+### Gaussian splatting (true 3DGS path)
+When enabled, the trainer runs a standard 3D Gaussian Splatting optimizer (graphdeco-style):
+- Scene represented as many **anisotropic 3D Gaussians** (mean \(\mu\), covariance \(\Sigma\), opacity \(\alpha\), and color).
+- Rendering is done by projecting Gaussians to screen space and **alpha-compositing** contributions along the ray.
+- Optimization is gradient-based:
+  - Minimizes an image reconstruction loss (e.g., photometric L2/SSIM-like components in the upstream repo).
+- **Densification / pruning**:
+  - Periodically splits/creates Gaussians in high-error regions and prunes low-contribution ones (opacity/size thresholds).
+
+Useful core equations:
+- **3D Gaussian density**:
+  \[
+    G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
+  \]
+- **Alpha compositing** (front-to-back) for ordered contributions \(k\):
+  \[
+    C = \sum_k \left(\alpha_k \prod_{m<k}(1-\alpha_m)\right)c_k
+  \]
+- **Typical training objective** (simplified):
+  \[
+    \min_\theta \sum_{i\in \text{pixels}} \lVert \hat{C}_i(\theta) - C_i \rVert_2^2
+  \]
+
+---
+
+## 3DGS trainer (true Gaussian Splatting)
+
+The backend can run graphdeco-style 3D Gaussian Splatting inside a separate Docker image.
+
+### Build trainer image (once)
+
+```bash
 docker build -t deep_space_3dgs_trainer:cu117 -f backend/gs_trainer/Dockerfile .
 ```
 
-### 3) Run a job (Balanced/Quality)
-Balanced/Quality presets default to:
-- `pose_backend="colmap"` (auto-fallback to OpenCV if COLMAP missing)
-- `gaussian_backend="docker_3dgs"`
-- `dashgaussian_schedule=True`
+### Fast rebuild when only wrapper changed
 
-If Docker training fails (missing Docker / image / GPU), the pipeline automatically falls back to the lightweight Gaussian PLY generator.
+```bash
+docker build -t deep_space_3dgs_trainer:cu117 -f backend/gs_trainer/Dockerfile.wrapper_only .
+```
 
-### Optional knobs (env vars)
-- `GS_3DGS_DOCKER_IMAGE`: override image name (default `deep_space_3dgs_trainer:cu117`)
-- `GS_LM_ENABLE=1` and `GS_LM_COMMAND=...`: enable the 3DGS-LM hook (requires your own LM runner)
-- `FCGS_ENABLE=1` + `FCGS_COMMAND="..."`: enable FCGS compression hook
-- `HACPP_ENABLE=1` + `HACPP_COMMAND="..."`: enable HAC++ compression hook
+---
 
-## Repository Layout
-- `backend/app.py` — FastAPI entrypoint, job orchestration, WebSockets.
-- `backend/pipelines/` — quality-specific pipelines using shared core components.
-- `backend/core/` — keyframes, depth, reconstruction, Gaussian splatting placeholder, meshing, texture/GLB baker, exporter.
-- `frontend/` — React/Vite client with upload, progress, and viewer components.
-- `docker-compose.yml` — dev orchestration; `backend/Dockerfile`, `frontend/Dockerfile`.
+## Troubleshooting (common failures)
 
-## Notes & Limitations
-- Reconstruction assumes a turntable-style capture (camera orbit around subject); arbitrary trajectories may degrade quality.
-- Gaussian splatting and texturing are simplified placeholders; GLB is holographic, not photorealistic.
-- Depth model download requires internet on first run; offline runs will use the edge-based fallback.
-- No automated test suite is included yet.
+### CUDA / driver mismatch errors (Windows)
+Examples:
+- `nvidia-container-cli: requirement error: unsatisfied condition: cuda>=...`
+- `CUDA driver version is insufficient for CUDA runtime version`
+
+These are **host driver ↔ container runtime** mismatches. Fix by updating the host driver/toolkit, or run CPU-only paths.
+
+### COLMAP: “No good initial image pair found”
+Means frames don’t have enough overlap/texture.
+
+Fixes:
+- move slower (more overlap)
+- avoid motion blur
+- use diffuse lighting; avoid reflections
+- use more frames (balanced/quality)
+
+### Backend rebuild takes long
+The backend image includes heavyweight deps (PyTorch, ONNXRuntime GPU).
+
+Tips:
+- if you only changed Python code under `backend/`, you often only need:
+
+```bash
+docker compose restart backend
+```
+
+Rebuild only when changing `backend/Dockerfile` or `backend/requirements.txt`.
+
+---
+
+## Repo layout
+- `backend/app.py`: FastAPI server + job orchestration
+- `backend/pipelines/`: fastest/balanced/quality pipelines
+- `backend/core/`: keyframes, poses, depth, reconstruction, meshing, gaussian, exporter
+- `frontend/`: React/Vite UI
+- `docker-compose.yml`: dev orchestration
+

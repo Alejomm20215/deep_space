@@ -69,6 +69,14 @@ class PipelineConfig(BaseModel):
     adaptive_prune_interval: int = 1000  # Prune every N iterations
     adaptive_prune_opacity: float = 0.01  # More aggressive during training
 
+    # Quality Validation (Phase 6)
+    validation_split: float = 0.0  # Fraction of images to hold out for testing (0.0 to 1.0)
+    calculate_metrics: bool = True  # Whether to compute PSNR/SSIM if possible
+
+    # Rendering Acceleration (Phase 4 - Speedy-Splat)
+    speedy_prune_enabled: bool = False
+    speedy_prune_threshold: float = 0.001
+
 
 QUALITY_PRESETS: Dict[QualityMode, PipelineConfig] = {
     QualityMode.FASTEST: PipelineConfig(
@@ -140,5 +148,10 @@ QUALITY_PRESETS: Dict[QualityMode, PipelineConfig] = {
         adaptive_prune_enabled=True,
         adaptive_prune_interval=1500,
         adaptive_prune_opacity=0.005,
+        # Quality validation
+        validation_split=0.1,
+        # Speedy-Splat rendering acceleration
+        speedy_prune_enabled=True,
+        speedy_prune_threshold=0.0005,
     )
 }
