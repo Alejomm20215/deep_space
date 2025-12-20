@@ -8,6 +8,8 @@ FastAPI + React/Vite service that turns a short video or a small set of images i
 - Background processing with WebSocket progress events and REST polling.
 - Browser-ready artifacts exposed at `/outputs/{job_id}/...` (served by FastAPI).
 - Depth model auto-download (Depth Anything V2 ONNX) with an edge-based fallback when offline.
+- Optional **true 3D Gaussian Splatting (3DGS)** training via a separate CUDA11.7 Docker trainer image (local-only).
+- Optional progressive training schedule (DashGaussian-style) with checkpoint resume to reduce wall time.
 
 ## Architecture & Pipeline
 - **Backend:** FastAPI (`backend/app.py`) orchestrates pipelines and exposes REST + WebSocket endpoints.
@@ -16,10 +18,13 @@ FastAPI + React/Vite service that turns a short video or a small set of images i
   1. Keyframe extraction from video or image folder (resized to preset resolutions).
   2. Depth estimation via Depth Anything V2 ONNX (GPU if available); falls back to edge-based depth.
   3. Sparse reconstruction with a turntable camera assumption → colored point cloud (`reconstruction.py`).
-  4. Gaussian splatting placeholder (currently passes the point cloud through to a `.splat` file).
+  4. Gaussian splatting:
+     - **Fast fallback:** generate a renderable Gaussian PLY from point colors (no training)
+     - **True 3DGS (optional):** run graphdeco-inria 3DGS in a dedicated Docker container (CUDA 11.7)
   5. Mesh extraction via SciPy Delaunay + filtering (`mesh_extraction.py`).
   6. Texture/GLB generation as a holographic-style mesh (`texture_baker.py`).
   7. Exporter copies artifacts to `backend/outputs/{job_id}` and returns HTTP URLs.
+  8. Metrics (`metrics.json`) + optional gzip splat + optional research compression hooks.
 
 ## Quality Presets (from `backend/config.py`)
 - **fastest** — 4 keyframes, skips 3DGS, quick Poisson-like mesh + simple texture. ~15–30s.
@@ -90,9 +95,38 @@ docker-compose up --build
 ## Outputs
 - Files are written to `backend/outputs/{job_id}`:
   - `model.glb` — holographic GLB
-  - `model.splat` — Gaussian splat placeholder (copied point cloud)
+  - `model.splat.ply` — Gaussian splat PLY (renderable)
+  - `model.splat.ply.gz` — gzip-compressed splat (for storage/transfer)
   - `pointcloud.ply` — colored sparse cloud
+  - `metrics.json` — counts/sizes/timing
 - Returned URLs map to the same paths under `/outputs/{job_id}/...`.
+
+## True 3DGS Training (local, Docker)
+This project can run **real 3D Gaussian Splatting** training using a separate Docker image (so the API container stays small).
+
+### 1) Install prerequisites
+- **Docker Desktop** (with NVIDIA GPU support enabled)
+- **COLMAP** available on PATH (for best results; otherwise pose estimation falls back to OpenCV)
+
+### 2) Build the trainer image (once)
+From repo root:
+```
+docker build -t deep_space_3dgs_trainer:cu117 -f backend/gs_trainer/Dockerfile .
+```
+
+### 3) Run a job (Balanced/Quality)
+Balanced/Quality presets default to:
+- `pose_backend="colmap"` (auto-fallback to OpenCV if COLMAP missing)
+- `gaussian_backend="docker_3dgs"`
+- `dashgaussian_schedule=True`
+
+If Docker training fails (missing Docker / image / GPU), the pipeline automatically falls back to the lightweight Gaussian PLY generator.
+
+### Optional knobs (env vars)
+- `GS_3DGS_DOCKER_IMAGE`: override image name (default `deep_space_3dgs_trainer:cu117`)
+- `GS_LM_ENABLE=1` and `GS_LM_COMMAND=...`: enable the 3DGS-LM hook (requires your own LM runner)
+- `FCGS_ENABLE=1` + `FCGS_COMMAND="..."`: enable FCGS compression hook
+- `HACPP_ENABLE=1` + `HACPP_COMMAND="..."`: enable HAC++ compression hook
 
 ## Repository Layout
 - `backend/app.py` — FastAPI entrypoint, job orchestration, WebSockets.

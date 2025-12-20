@@ -5,14 +5,13 @@ Creates dense 2.5D relief mesh from best image.
 """
 import asyncio
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import cv2
 import numpy as np
 from backend.config import PipelineConfig
 from backend.core.depth_estimator import get_depth_estimator
-from backend.core.pose_estimator import PoseEstimator
-from backend.core.fast3r_runner import Fast3RRunner
+from backend.core.poses.factory import create_best_available_pose_backend
 
 
 class Fast3RReconstructor:
@@ -24,23 +23,22 @@ class Fast3RReconstructor:
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.depth_estimator = None
-        self.pose_estimator = PoseEstimator()
-        self.fast3r_runner = None
+        self._pose_backend = None
 
     def _get_depth_estimator(self):
         if self.depth_estimator is None:
             self.depth_estimator = get_depth_estimator(use_refinement=True)
         return self.depth_estimator
 
-    def _get_fast3r_runner(self):
-        if self.fast3r_runner is None:
-            self.fast3r_runner = Fast3RRunner()
-        return self.fast3r_runner
+    def _get_pose_backend(self):
+        if self._pose_backend is None:
+            self._pose_backend = create_best_available_pose_backend(self.config.pose_backend)
+        return self._pose_backend
 
     async def reconstruct(self, image_paths: List[str], output_dir: str, progress_callback=None) -> Dict[str, Any]:
         """
         Reconstruct 3D model from images.
-        - Multi-view: estimate poses with OpenCV (E-matrix), depth per view, fuse meshes.
+        - Multi-view: estimate poses (COLMAP if available, else OpenCV), depth per view, fuse meshes.
         - Single-image fallback: dense 2.5D relief.
         """
         os.makedirs(output_dir, exist_ok=True)
@@ -51,23 +49,13 @@ class Fast3RReconstructor:
         if len(image_paths) == 1:
             return await self._single_image_relief(image_paths[0], output_dir, progress_callback)
 
-        poses = None
-        K = None
-
-        # Try Fast3R poses first (if installed)
-        try:
-            fr = self._get_fast3r_runner()
-            if progress_callback:
-                await progress_callback(6, "Estimating poses with Fast3R...")
-            poses, K = await asyncio.to_thread(fr.estimate_poses, image_paths)
-        except Exception as e:
-            print(f"[Fast3R] Pose estimation failed or unavailable: {e}")
-
-        # Fallback to lightweight OpenCV pose estimator
-        if poses is None or K is None:
-            if progress_callback:
-                await progress_callback(8, "Estimating poses (OpenCV)...")
-            poses, K = await asyncio.to_thread(self.pose_estimator.estimate, image_paths)
+        pose_backend = self._get_pose_backend()
+        if progress_callback:
+            await progress_callback(6, f"Estimating poses ({pose_backend.name})...")
+        sfm_dir = os.path.join(output_dir, "sfm")
+        pose_result = await asyncio.to_thread(pose_backend.estimate, image_paths, sfm_dir)
+        poses = pose_result.poses_c2w
+        K = pose_result.K
 
         estimator = self._get_depth_estimator()
         all_vertices, all_colors, all_faces = [], [], []
@@ -117,12 +105,17 @@ class Fast3RReconstructor:
         poses_path = os.path.join(output_dir, "poses.npy")
         np.save(poses_path, np.stack(poses, axis=0))
 
+        K_path = os.path.join(output_dir, "intrinsics.npy")
+        np.save(K_path, K)
+
         if progress_callback:
             await progress_callback(95, f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
         return {
             "point_cloud": ply_path,
             "poses": poses_path,
+            "intrinsics": K_path,
+            "sfm_dir": sfm_dir,
             "point_count": len(vertices),
             "face_count": len(faces)
         }
@@ -161,12 +154,20 @@ class Fast3RReconstructor:
         poses_path = os.path.join(output_dir, "poses.npy")
         np.save(poses_path, np.eye(4, dtype=np.float32))
 
+        K_path = os.path.join(output_dir, "intrinsics.npy")
+        # Approx intrinsics for single image (matches PoseEstimator heuristic)
+        fx = fy = max(img.shape[0], img.shape[1]) * 0.8
+        cx, cy = img.shape[1] / 2.0, img.shape[0] / 2.0
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+        np.save(K_path, K)
+
         if progress_callback:
             await progress_callback(95, f"Mesh: {len(vertices)} vertices, {len(faces)} faces")
 
         return {
             "point_cloud": ply_path,
             "poses": poses_path,
+            "intrinsics": K_path,
             "point_count": len(vertices),
             "face_count": len(faces)
         }

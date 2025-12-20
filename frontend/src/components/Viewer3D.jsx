@@ -32,13 +32,13 @@ const Viewer3D = ({ modelUrl }) => {
                 Interactive 3D Preview
             </div>
 
-            <Canvas shadows dpr={[1, 2]} camera={{ fov: 50 }}>
+            <Canvas shadows dpr={[1, 1]} camera={{ fov: 50 }}>
                 <Suspense fallback={null}>
                     <Stage environment="city" intensity={0.6}>
                         <Model url={modelUrl} />
                     </Stage>
                 </Suspense>
-                <OrbitControls autoRotate />
+                <OrbitControls />
             </Canvas>
 
             <div style={{

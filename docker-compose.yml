@@ -1,7 +1,6 @@
-version: '3.8'
-
 services:
   backend:
+    image: deep_space-backend:latest
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -12,8 +11,15 @@ services:
       # Persist outputs
       - backend_outputs:/app/backend/outputs
       - backend_models:/app/backend/models
+      # Allow backend container to launch sibling containers (3DGS trainer, COLMAP)
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - PYTHONUNBUFFERED=1
+      - GS_3DGS_DOCKER_IMAGE=deep_space_3dgs_trainer:cu117
+      - COLMAP_DOCKER_IMAGE=colmap/colmap
+      - HOST_PWD=${PWD}
+    # Enable NVIDIA GPU (compose v2)
+    gpus: all
     # Enable NVIDIA GPU
     deploy:
       resources:
@@ -24,6 +30,7 @@ services:
               capabilities: [gpu]
 
   frontend:
+    image: deep_space-frontend:latest
     build:
       context: .
       dockerfile: frontend/Dockerfile

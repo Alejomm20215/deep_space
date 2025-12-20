@@ -4,6 +4,8 @@ import UploadZone from './components/UploadZone';
 import QualitySelector from './components/QualitySelector';
 import ProcessingStatus from './components/ProcessingStatus';
 import Viewer3D from './components/Viewer3D';
+import SplatViewer from './components/SplatViewer';
+import MetricsPanel from './components/MetricsPanel';
 import DownloadPanel from './components/DownloadPanel';
 import { Box } from 'lucide-react';
 
@@ -62,7 +64,9 @@ const App = () => {
                 {/* State: COMPLETE - Results & Viewer */}
                 {status === 'complete' && result && (
                     <div className="fade-in">
-                        <Viewer3D modelUrl={result.glb} />
+                        {result.glb && <Viewer3D modelUrl={result.glb} />}
+                        {result.splat && <SplatViewer splatUrl={result.splat} />}
+                        {result.metrics && <MetricsPanel metricsUrl={result.metrics} />}
 
                         <div style={{ textAlign: 'center', marginTop: '20px' }}>
                             <h2 style={{ fontSize: '24px', marginBottom: '8px' }}>Scan Complete!</h2>

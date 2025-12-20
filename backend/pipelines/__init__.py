@@ -9,12 +9,15 @@ from backend.core import (
     TextureBaker, 
     Exporter
 )
+from backend.core.dataset_layout import JobLayout
 
 class BasePipeline:
     def __init__(self, job_id: str, config: PipelineConfig, base_dir: str = "temp_processing"):
         self.job_id = job_id
         self.config = config
         self.output_dir = os.path.join(base_dir, job_id)
+        self.layout = JobLayout(self.output_dir)
+        self.layout.ensure_dirs()
         
         # Initialize core components
         self.extractor = KeyframeExtractor(config)
