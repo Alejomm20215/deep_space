@@ -152,9 +152,7 @@ Common files:
 
 ---
 
-## Math / algorithms used (practical overview)
-
-This section is intentionally organized as **term → meaning → math**.
+## Practical overview
 
 ### Pinhole camera model (projection)
 **Meaning:** maps a 3D point \(X\) to a 2D pixel \(x\) given intrinsics \(K\) and pose \((R,t)\).
