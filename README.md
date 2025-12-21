@@ -154,70 +154,89 @@ Common files:
 
 ## Math / algorithms used (practical overview)
 
-This is a “what’s under the hood” summary of the main mathematical pieces used in the pipeline.
+This section is intentionally organized as **term → meaning → math**.
 
-### Camera + geometry basics
-- **Pinhole camera model**:
-  - Pixel projection (ignoring distortion): \(x \sim K [R \mid t] X\)
-  - \(K\) is intrinsics, \(R,t\) are pose, \(X\) is 3D point.
-  - In inhomogeneous image coordinates, with \(X_c = R X + t\): \((u, v) = \left(f_x \frac{X_c}{Z_c} + c_x,\; f_y \frac{Y_c}{Z_c} + c_y\right)\)
+### Pinhole camera model (projection)
+**Meaning:** maps a 3D point \(X\) to a 2D pixel \(x\) given intrinsics \(K\) and pose \((R,t)\).
 
-### Pose estimation (two backends)
-- **COLMAP (SfM)** (when it succeeds):
-  - Feature detection + matching (SIFT-style), geometric verification, and **incremental Structure-from-Motion**
-  - Uses **bundle adjustment** (nonlinear least squares) to refine camera poses + 3D points by minimizing reprojection error:
-    \[
-      \min_{\{R_i,t_i,X_j\}} \sum_{(i,j)\in\mathcal{O}} \left\lVert \pi\!\left(K_i(R_i X_j + t_i)\right) - x_{ij} \right\rVert_2^2
-    \]
-- **OpenCV fallback** (when COLMAP fails):
-  - Pairwise epipolar geometry via the **Essential matrix** \(E\) with **RANSAC** outlier rejection
-  - Decomposes \(E\) to recover relative \(R,t\) up to scale (sufficient for our lightweight pipeline).
-  - Epipolar constraint (normalized image points): \(x'^T E x = 0\), with \(E = [t]_\times R\)
-
-### Depth processing (mesh preview path)
-- **Monocular depth estimation** (ONNX model): produces **relative depth** (not metric).
-- **Robust normalization + outlier clipping**:
-  - Normalize depth to \([0,1]\), clip extremes using quantiles (e.g., 2%–98%) to prevent “spikes”.
-- **Edge-preserving smoothing**:
-  - Uses a **bilateral filter** (spatial + range weighting) to reduce noise while keeping edges sharper than a blur.
-  - One common bilateral form:
-    \[
-      \hat{I}(p)=\frac{1}{W_p}\sum_{q\in\Omega} \exp\!\left(-\frac{\lVert p-q\rVert^2}{2\sigma_s^2}\right)\exp\!\left(-\frac{(I(p)-I(q))^2}{2\sigma_r^2}\right)I(q)
-    \]
-
-### Mesh construction + simplification
-- **Depth-to-mesh lifting**:
-  - Create a grid of vertices from pixels; convert depth \(z\) into a small relief displacement.
-- **Triangulation**:
-  - Uses **Delaunay triangulation** (via SciPy) for triangle connectivity in the generated surface.
-- **Decimation (size control)**:
-  - Uses **Quadric Error Metrics (QEM)** “quadratic decimation” (via `trimesh`) to reduce faces while preserving shape as much as possible.
-  - QEM idea: each vertex has a quadric \(Q\) (sum of plane quadrics), and collapsing to \(v\) minimizes:
-    \[
-      E(v) = v^T Q v
-    \]
-
-### Gaussian splatting (true 3DGS path)
-When enabled, the trainer runs a standard 3D Gaussian Splatting optimizer (graphdeco-style):
-- Scene represented as many **anisotropic 3D Gaussians** (mean \(\mu\), covariance \(\Sigma\), opacity \(\alpha\), and color).
-- Rendering is done by projecting Gaussians to screen space and **alpha-compositing** contributions along the ray.
-- Optimization is gradient-based:
-  - Minimizes an image reconstruction loss (e.g., photometric L2/SSIM-like components in the upstream repo).
-- **Densification / pruning**:
-  - Periodically splits/creates Gaussians in high-error regions and prunes low-contribution ones (opacity/size thresholds).
-
-Useful core equations:
-- **3D Gaussian density**:
+**Math:**
+- Homogeneous form: \(x \sim K [R \mid t] X\)
+- Inhomogeneous pixel coordinates (with \(X_c = R X + t\)):
   \[
-    G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
+  (u, v) = \left(f_x \frac{X_c}{Z_c} + c_x,\; f_y \frac{Y_c}{Z_c} + c_y\right)
   \]
-- **Alpha compositing** (front-to-back) for ordered contributions \(k\):
+
+### SfM (Structure-from-Motion) — COLMAP backend
+**Meaning:** estimates camera poses + sparse 3D points from many overlapping images by matching features and enforcing geometry.
+
+**Math (core objective via bundle adjustment):**
+\[
+\min_{\{R_i,t_i,X_j\}} \sum_{(i,j)\in\mathcal{O}} \left\lVert \pi\!\left(K_i(R_i X_j + t_i)\right) - x_{ij} \right\rVert_2^2
+\]
+Where \(\mathcal{O}\) is the set of observed 2D measurements \(x_{ij}\), and \(\pi(\cdot)\) projects to image coordinates.
+
+### BA (Bundle Adjustment)
+**Meaning:** the nonlinear least-squares refinement step inside SfM that “tightens” poses/points by reducing reprojection error.
+
+**Math:** BA is typically solved with Gauss–Newton / Levenberg–Marquardt on the same objective above (often with robust losses in practice).
+
+### Essential matrix \(E\) — OpenCV fallback pose backend
+**Meaning:** estimates relative motion between two calibrated views using epipolar geometry (works even when full SfM fails).
+
+**Math:**
+- Epipolar constraint: \(x'^T E x = 0\)
+- Relationship to motion: \(E = [t]_\times R\) where \([t]_\times\) is the skew-symmetric cross-product matrix.
+
+### RANSAC
+**Meaning:** robustly fits a model (e.g., \(E\)) when many matches are outliers by repeatedly sampling minimal sets and scoring consensus.
+
+**Math (idea):** choose model parameters \(\theta\) maximizing inliers under an error threshold \(\tau\):
+\[
+\arg\max_\theta \sum_k \mathbf{1}\big(e_k(\theta) < \tau\big)
+\]
+
+### Monocular depth (relative depth) + post-processing
+**Meaning:** the depth model outputs **relative** depth; we normalize and smooth it so the mesh preview doesn’t explode with spikes.
+
+**Math (common steps):**
+- Normalize: \(d \leftarrow \frac{d-\min(d)}{\max(d)-\min(d)}\)
+- Quantile clipping: \(d \leftarrow \mathrm{clip}(d, q_{0.02}, q_{0.98})\) then renormalize
+
+### Bilateral filter (edge-preserving smoothing)
+**Meaning:** smooths noise while preserving edges by weighting neighbors by distance and intensity similarity.
+
+**Math:**
+\[
+\hat{I}(p)=\frac{1}{W_p}\sum_{q\in\Omega} \exp\!\left(-\frac{\lVert p-q\rVert^2}{2\sigma_s^2}\right)\exp\!\left(-\frac{(I(p)-I(q))^2}{2\sigma_r^2}\right)I(q)
+\]
+
+### Delaunay triangulation (mesh connectivity)
+**Meaning:** builds triangles from points such that triangles avoid skinny shapes (circumcircle property); used to connect the depth-lifted surface.
+
+### QEM (Quadric Error Metrics) decimation
+**Meaning:** reduces triangle count by collapsing edges while minimizing geometric error (keeps GLB size manageable).
+
+**Math (core scoring idea):**
+\[
+E(v) = v^T Q v
+\]
+Where \(Q\) accumulates plane quadrics from incident faces; collapsing chooses \(v\) that minimizes \(E(v)\).
+
+### GS / 3DGS (3D Gaussian Splatting) — trainer backend
+**Meaning:** represents the scene as many **anisotropic 3D Gaussians** and optimizes them so renders match training images.
+
+**Math (key pieces):**
+- 3D Gaussian density:
   \[
-    C = \sum_k \left(\alpha_k \prod_{m<k}(1-\alpha_m)\right)c_k
+  G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
   \]
-- **Typical training objective** (simplified):
+- Front-to-back alpha compositing (ordered contributions \(k\)):
   \[
-    \min_\theta \sum_{i\in \text{pixels}} \lVert \hat{C}_i(\theta) - C_i \rVert_2^2
+  C = \sum_k \left(\alpha_k \prod_{m<k}(1-\alpha_m)\right)c_k
+  \]
+- Simplified training objective:
+  \[
+  \min_\theta \sum_{i\in \text{pixels}} \lVert \hat{C}_i(\theta) - C_i \rVert_2^2
   \]
 
 ---
