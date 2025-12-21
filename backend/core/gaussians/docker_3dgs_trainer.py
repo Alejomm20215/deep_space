@@ -59,9 +59,22 @@ def _to_host_path(container_path: str) -> str:
     
     # In container, everything is under /app. 
     # If path starts with /app, replace it with HOST_PWD
+    host_pwd_norm = host_pwd.replace("\\", "/").rstrip("/")
     abs_container = os.path.abspath(container_path).replace("\\", "/")
     if abs_container.startswith("/app"):
-        return abs_container.replace("/app", host_pwd, 1)
+        abs_container = abs_container.replace("/app", host_pwd_norm, 1)
+
+    abs_container = abs_container.replace("\\", "/")
+
+    # If we're a Linux container talking to Docker Desktop daemon, Windows drive paths
+    # like C:/... must be converted to the daemon's internal host mount path.
+    if os.name != "nt":
+        m = re.match(r"^([A-Za-z]):/(.*)$", abs_container)
+        if m:
+            drive = m.group(1).lower()
+            rest = m.group(2)
+            return f"/run/desktop/mnt/host/{drive}/{rest}"
+
     return abs_container
 
 def train_3dgs_docker(
@@ -77,6 +90,7 @@ def train_3dgs_docker(
     start_checkpoint: Optional[str] = None,
     save_iterations: Optional[List[int]] = None,
     checkpoint_iterations: Optional[List[int]] = None,
+    eval_split: bool = False,
 ) -> TrainResult:
     """
     Run 3DGS training via Docker container.
@@ -93,6 +107,7 @@ def train_3dgs_docker(
         start_checkpoint: Optional checkpoint to resume from
         save_iterations: Optional list of iterations to save point_cloud.ply
         checkpoint_iterations: Optional list of iterations to save checkpoints
+        eval_split: Whether to hold out images for evaluation
     
     Returns:
         TrainResult with model directory, PLY path, and checkpoint path
@@ -101,6 +116,11 @@ def train_3dgs_docker(
 
     # Windows path -> docker mount path works with Docker Desktop; we keep it absolute.
     docker = _which_docker()
+
+    print(
+        f"[3dgs] docker train: image={image} | iters={iterations} | res={resolution} | densify_from={densify_from_iter} | densify_until={densify_until_iter} | densify_interval={densify_interval} | eval={eval_split}",
+        flush=True,
+    )
 
     cmd = [
         docker,
@@ -129,6 +149,9 @@ def train_3dgs_docker(
         str(densify_interval),
     ]
 
+    if eval_split:
+        cmd += ["--eval"]
+
     if start_checkpoint:
         # start_checkpoint must be inside /model for the container
         ck = os.path.abspath(start_checkpoint)
@@ -144,6 +167,7 @@ def train_3dgs_docker(
         cmd += ["--checkpoint_iterations", ",".join(str(i) for i in checkpoint_iterations)]
 
     try:
+        print(f"[3dgs] docker cmd: {' '.join(cmd)}", flush=True)
         subprocess.run(cmd, check=True)
     except FileNotFoundError as e:
         raise RuntimeError("Docker not found. Install Docker Desktop or run without docker training.") from e
@@ -157,6 +181,7 @@ def train_3dgs_docker(
     for name in os.listdir(model_dir):
         if name.startswith("chkpnt") and name.endswith(".pth"):
             ckpt = os.path.join(model_dir, name)
+    print(f"[3dgs] done: ply={ply} | ckpt={ckpt}", flush=True)
     return TrainResult(model_dir=model_dir, gaussian_ply=ply, checkpoint_path=ckpt)
 
 
@@ -172,6 +197,7 @@ def train_3dgs_adaptive(
     densify_from_iter: int,
     densify_until_iter: int,
     densify_interval: int,
+    eval_split: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> AdaptiveTrainResult:
     """
@@ -191,6 +217,7 @@ def train_3dgs_adaptive(
         densify_from_iter: Start densification at this iteration
         densify_until_iter: Stop densification at this iteration
         densify_interval: Densify every N iterations
+        eval_split: Whether to hold out images for evaluation
         progress_callback: Optional callback(phase, message)
     
     Returns:
@@ -207,6 +234,7 @@ def train_3dgs_adaptive(
         densify_from_iter=densify_from_iter,
         densify_until_iter=densify_until_iter,
         densify_interval=densify_interval,
+        eval_split=eval_split,
         progress_callback=progress_callback,
     )
 

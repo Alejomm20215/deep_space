@@ -21,6 +21,10 @@ class ArtifactMetrics:
     gaussian_count: Optional[int]
     mesh_faces: Optional[int]
     sizes_bytes: Dict[str, int]
+    # Quality metrics (Phase 6)
+    psnr: Optional[float] = None
+    ssim: Optional[float] = None
+    lpips: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,6 +35,9 @@ class ArtifactMetrics:
             "gaussian_count": self.gaussian_count,
             "mesh_faces": self.mesh_faces,
             "sizes_bytes": self.sizes_bytes,
+            "psnr": self.psnr,
+            "ssim": self.ssim,
+            "lpips": self.lpips,
         }
 
 
@@ -45,19 +52,31 @@ def _file_size(path: Optional[str]) -> int:
 
 def _ply_counts(ply_path: Optional[str]) -> tuple[Optional[int], Optional[int]]:
     """
-    Returns (vertex_count, face_count) for an ASCII PLY if header is readable.
+    Returns (vertex_count, face_count) for a PLY if header is readable.
+    Supports both ASCII and binary PLY by parsing only the header.
     """
     if not ply_path or not os.path.exists(ply_path):
         return None, None
     v = None
     f = None
     try:
-        with open(ply_path, "r", encoding="utf-8") as fh:
-            for line in fh:
+        # Read as bytes to avoid UnicodeDecodeError for binary PLY bodies.
+        with open(ply_path, "rb") as fh:
+            while True:
+                line_b = fh.readline()
+                if not line_b:
+                    break
+                line = line_b.decode("ascii", errors="ignore")
                 if line.startswith("element vertex"):
-                    v = int(line.split()[-1])
+                    try:
+                        v = int(line.split()[-1])
+                    except Exception:
+                        pass
                 elif line.startswith("element face"):
-                    f = int(line.split()[-1])
+                    try:
+                        f = int(line.split()[-1])
+                    except Exception:
+                        pass
                 elif line.strip() == "end_header":
                     break
     except OSError:
@@ -73,6 +92,9 @@ def compute_metrics(
     gaussian_ply: Optional[str],
     mesh_ply: Optional[str],
     glb_path: Optional[str],
+    psnr: Optional[float] = None,
+    ssim: Optional[float] = None,
+    lpips: Optional[float] = None,
 ) -> ArtifactMetrics:
     pc_v, pc_f = _ply_counts(point_cloud_ply)
     gs_v, _ = _ply_counts(gaussian_ply)
@@ -93,6 +115,9 @@ def compute_metrics(
         gaussian_count=gs_v,
         mesh_faces=mesh_f,
         sizes_bytes=sizes,
+        psnr=psnr,
+        ssim=ssim,
+        lpips=lpips,
     )
 
 

@@ -7,6 +7,7 @@ Provides methods to detect symmetry axes and prune redundant mirrored Gaussians.
 from __future__ import annotations
 
 import os
+import shutil
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple, List
@@ -22,6 +23,28 @@ class SymmetryResult:
     message: str
 
 
+def _read_ply_header_info(ply_path: str) -> tuple[bool, int]:
+    """Return (is_binary, vertex_count) by parsing only the PLY header (binary-safe)."""
+    is_binary = False
+    vertex_count = 0
+    with open(ply_path, "rb") as f:
+        while True:
+            line_b = f.readline()
+            if not line_b:
+                break
+            line = line_b.decode("ascii", errors="ignore").strip()
+            if line.startswith("format") and "binary" in line:
+                is_binary = True
+            elif line.startswith("element vertex"):
+                try:
+                    vertex_count = int(line.split()[-1])
+                except Exception:
+                    vertex_count = 0
+            elif line == "end_header":
+                break
+    return is_binary, vertex_count
+
+
 def apply_symmetry_pruning(
     *,
     input_path: str,
@@ -35,6 +58,20 @@ def apply_symmetry_pruning(
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(input_path)
+
+    is_binary, vcount = _read_ply_header_info(input_path)
+    if is_binary:
+        # Symmetry pruning here is ASCII-only; 3DGS often outputs binary PLY.
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        shutil.copy2(input_path, output_path)
+        return SymmetryResult(
+            original_path=input_path,
+            pruned_path=output_path,
+            axis=axis,
+            kept_count=int(vcount or 0),
+            removed_count=0,
+            message="Binary PLY detected; symmetry pruning skipped (passthrough copy).",
+        )
 
     # 1. Read the Gaussian PLY
     # For speed in this utility, we'll use a simplified reader

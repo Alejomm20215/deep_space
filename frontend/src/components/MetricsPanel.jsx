@@ -34,10 +34,8 @@ const MetricsPanel = ({ metricsUrl }) => {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
                     <div><b>Frames:</b> {metrics.frames}</div>
                     <div><b>Mesh faces:</b> {metrics.mesh_faces ?? 'n/a'}</div>
-                    <div><b>Gaussians:</b> {metrics.gaussian_count ?? 'n/a'}</div>
                     <div><b>Elapsed:</b> {metrics.elapsed_seconds ? `${metrics.elapsed_seconds.toFixed(1)}s` : 'n/a'}</div>
                     <div><b>GLB size:</b> {metrics.sizes_bytes?.glb ?? 0} bytes</div>
-                    <div><b>Splat size:</b> {metrics.sizes_bytes?.gaussian_ply ?? 0} bytes</div>
                 </div>
             )}
         </div>

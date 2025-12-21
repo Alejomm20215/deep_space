@@ -64,6 +64,7 @@ class GaussianSplattingOptimizer:
                         densify_from_iter=self.config.gaussian_densify_from,
                         densify_until_iter=self.config.gaussian_densify_until or self.config.gaussian_iterations,
                         densify_interval=self.config.gaussian_densify_interval or 100,
+                        eval_split=(self.config.validation_split > 0),
                         progress_callback=None,  # Could pipe to progress_callback if needed
                     )
                     ply_path = adaptive_result.gaussian_ply
@@ -86,6 +87,7 @@ class GaussianSplattingOptimizer:
                         densify_until_iter=min(self.config.gaussian_densify_until, stage1_iters),
                         densify_interval=self.config.gaussian_densify_interval or 100,
                         start_checkpoint=None,
+                        eval_split=(self.config.validation_split > 0),
                     )
 
                     # stage 2: resume with target resolution
@@ -101,6 +103,7 @@ class GaussianSplattingOptimizer:
                         densify_until_iter=self.config.gaussian_densify_until,
                         densify_interval=self.config.gaussian_densify_interval or 100,
                         start_checkpoint=ckpt,
+                        eval_split=(self.config.validation_split > 0),
                     )
                     ply_path = res2.gaussian_ply
                 else:
@@ -114,6 +117,7 @@ class GaussianSplattingOptimizer:
                         densify_until_iter=self.config.gaussian_densify_until or self.config.gaussian_iterations,
                         densify_interval=self.config.gaussian_densify_interval or 100,
                         start_checkpoint=None,
+                        eval_split=(self.config.validation_split > 0),
                     )
                     ply_path = res.gaussian_ply
 

@@ -44,9 +44,22 @@ def _to_host_path(container_path: str) -> str:
     if not host_pwd:
         return os.path.abspath(container_path)
     
+    host_pwd_norm = host_pwd.replace("\\", "/").rstrip("/")
     abs_container = os.path.abspath(container_path).replace("\\", "/")
     if abs_container.startswith("/app"):
-        return abs_container.replace("/app", host_pwd, 1)
+        abs_container = abs_container.replace("/app", host_pwd_norm, 1)
+
+    abs_container = abs_container.replace("\\", "/")
+
+    # If we're a Linux container talking to Docker Desktop daemon, Windows drive paths
+    # like C:/... must be converted to the daemon's internal host mount path.
+    if os.name != "nt":
+        m = re.match(r"^([A-Za-z]):/(.*)$", abs_container)
+        if m:
+            drive = m.group(1).lower()
+            rest = m.group(2)
+            return f"/run/desktop/mnt/host/{drive}/{rest}"
+
     return abs_container
 
 
@@ -101,6 +114,7 @@ def _run_training_phase(
     save_iterations: List[int],
     checkpoint_iterations: List[int],
     start_checkpoint: Optional[str] = None,
+    eval_split: bool = False,
 ) -> None:
     """Run a single training phase via Docker."""
     docker = "docker"
@@ -131,6 +145,9 @@ def _run_training_phase(
         "--densify_interval",
         str(densify_interval),
     ]
+
+    if eval_split:
+        cmd += ["--eval"]
 
     if save_iterations:
         cmd += ["--save_iterations", ",".join(str(i) for i in save_iterations)]
@@ -186,6 +203,7 @@ def train_adaptive(
     densify_from_iter: int,
     densify_until_iter: int,
     densify_interval: int,
+    eval_split: bool = False,
     progress_callback: Optional[Callable[[int, str], None]] = None,
 ) -> AdaptiveTrainResult:
     """
@@ -202,6 +220,7 @@ def train_adaptive(
         densify_from_iter: Start densification at this iteration
         densify_until_iter: Stop densification at this iteration
         densify_interval: Densify every N iterations
+        eval_split: Whether to hold out images for evaluation
         progress_callback: Optional callback(phase, message)
     
     Returns:
@@ -228,6 +247,7 @@ def train_adaptive(
             densify_interval=densify_interval,
             save_iterations=[total_iterations],
             checkpoint_iterations=[total_iterations],
+            eval_split=eval_split,
         )
         
         ply = _latest_pointcloud_ply(model_dir)
@@ -270,6 +290,7 @@ def train_adaptive(
             save_iterations=[end_iter],
             checkpoint_iterations=[end_iter],
             start_checkpoint=current_checkpoint,
+            eval_split=eval_split,
         )
 
         # Get current PLY and checkpoint

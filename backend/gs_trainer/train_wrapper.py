@@ -37,9 +37,27 @@ def main() -> int:
         default=None,
         help="Comma-separated list of iterations to save point_cloud.ply, e.g. '1000,2000,3000'"
     )
+    ap.add_argument("--eval", action="store_true", help="Enable evaluation split (every 8th image)")
     args = ap.parse_args()
 
     os.makedirs(args.model, exist_ok=True)
+
+    # train.py flag compatibility:
+    # Some versions use --densify_interval, others use --densification_interval.
+    help_text = ""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "train.py", "-h"],
+            capture_output=True,
+            text=True,
+        )
+        help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    except Exception:
+        help_text = ""
+
+    densify_flag = "--densify_interval"
+    if "--densification_interval" in help_text:
+        densify_flag = "--densification_interval"
 
     cmd = [
         sys.executable,
@@ -56,9 +74,12 @@ def main() -> int:
         str(args.densify_from_iter),
         "--densify_until_iter",
         str(args.densify_until_iter),
-        "--densify_interval",
+        densify_flag,
         str(args.densify_interval),
     ]
+
+    if args.eval:
+        cmd += ["--eval"]
 
     if args.start_checkpoint:
         cmd += ["--start_checkpoint", args.start_checkpoint]

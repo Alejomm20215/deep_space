@@ -9,6 +9,7 @@ export const useProcessing = () => {
     const [jobId, setJobId] = useState(null);
 
     const wsRef = useRef(null);
+    const lastProgressRef = useRef({ t: 0, progress: -1, stage: '', detail: '' });
 
     const connectWebSocket = useCallback((id) => {
         // In production, use wss:// and proper host
@@ -44,10 +45,30 @@ export const useProcessing = () => {
                 updateStateFromStatus(data.status);
                 break;
             case 'progress':
-                setStatus('processing');
-                setStage(data.stage);
-                setProgress(data.progress);
-                setDetail(data.detail);
+                // Throttle progress updates to keep the UI responsive.
+                // (WS can burst updates; React rerenders + 3D previews can stutter badly.)
+                {
+                    const now = Date.now();
+                    const prev = lastProgressRef.current;
+                    const samePayload =
+                        prev.progress === data.progress &&
+                        prev.stage === data.stage &&
+                        prev.detail === data.detail;
+                    const tooSoon = now - prev.t < 120; // ~8 updates/sec max
+
+                    if (!samePayload && !tooSoon) {
+                        lastProgressRef.current = {
+                            t: now,
+                            progress: data.progress,
+                            stage: data.stage,
+                            detail: data.detail,
+                        };
+                        setStatus('processing');
+                        setStage(data.stage);
+                        setProgress(data.progress);
+                        setDetail(data.detail);
+                    }
+                }
                 break;
             case 'complete':
                 setStatus('complete');

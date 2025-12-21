@@ -53,8 +53,25 @@ class KeyframeExtractor:
         # Case 2: Input is a video file
         cap = cv2.VideoCapture(input_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        indices = np.linspace(0, total_frames - 1, self.config.max_keyframes, dtype=int)
+
+        # IMPORTANT:
+        # COLMAP needs overlapping views. Sampling frames uniformly across the *entire* video
+        # (np.linspace(0..end)) often produces large viewpoint jumps -> "no good initial pair".
+        #
+        # Instead, take a *contiguous* sequence of frames with a modest stride so adjacent
+        # frames overlap. This dramatically improves COLMAP success rate and pose quality.
+        max_k = max(int(self.config.max_keyframes), 2)
+        if total_frames <= 0:
+            cap.release()
+            return []
+
+        # Choose a small stride: more overlap, fewer failures.
+        # Heuristic: aim to span about ~1/8th of the video for max_keyframes frames.
+        stride = max(1, int(total_frames // max(1, (max_k * 8))))
+        window_len = stride * (max_k - 1) + 1
+        start = max(0, (total_frames - window_len) // 2)
+
+        indices = [min(total_frames - 1, start + i * stride) for i in range(max_k)]
         
         for i, frame_idx in enumerate(indices):
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)

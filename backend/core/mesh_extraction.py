@@ -31,11 +31,18 @@ class MeshExtractor:
         has_faces = await asyncio.to_thread(self._ply_has_faces, input_model)
 
         if has_faces:
-            # Already a mesh - just copy/pass through
+            # Already a mesh - copy + optionally decimate to target_triangles
             if progress_callback:
-                await progress_callback(50, "Using pre-built mesh...")
-            
-            await asyncio.to_thread(self._copy_file, input_model, output_mesh)
+                await progress_callback(40, "Using pre-built mesh...")
+
+            # Decimate huge meshes; otherwise the web viewer becomes unusable.
+            target = int(self.config.target_triangles or 0)
+            if target > 0:
+                if progress_callback:
+                    await progress_callback(55, f"Reducing mesh to ~{target:,} triangles...")
+                await asyncio.to_thread(self._decimate_mesh_if_needed, input_model, output_mesh, target)
+            else:
+                await asyncio.to_thread(self._copy_file, input_model, output_mesh)
         else:
             # Point cloud only - create simple mesh
             if progress_callback:
@@ -72,6 +79,44 @@ class MeshExtractor:
         """Copy file from src to dst."""
         import shutil
         shutil.copy2(src, dst)
+
+    def _decimate_mesh_if_needed(self, src_ply: str, dst_ply: str, target_faces: int) -> None:
+        """
+        Reduce triangle count to target_faces using trimesh.
+        If simplification fails, fall back to copying the original mesh.
+        """
+        import shutil
+
+        try:
+            import trimesh
+        except Exception:
+            shutil.copy2(src_ply, dst_ply)
+            return
+
+        try:
+            mesh = trimesh.load(src_ply, force="mesh", process=False)
+            if mesh is None or not hasattr(mesh, "faces") or mesh.faces is None:
+                shutil.copy2(src_ply, dst_ply)
+                return
+
+            face_count = int(len(mesh.faces))
+            if face_count <= 0:
+                shutil.copy2(src_ply, dst_ply)
+                return
+
+            # Only simplify if it is meaningfully larger than target.
+            if face_count <= int(target_faces * 1.15):
+                shutil.copy2(src_ply, dst_ply)
+                return
+
+            simplified = mesh.simplify_quadratic_decimation(int(target_faces))
+            if simplified is None or int(len(simplified.faces)) <= 0:
+                shutil.copy2(src_ply, dst_ply)
+                return
+
+            simplified.export(dst_ply)
+        except Exception:
+            shutil.copy2(src_ply, dst_ply)
 
     def _create_mesh_from_points(self, ply_path: str, output_path: str):
         """

@@ -5,7 +5,7 @@ from backend.core.dataset_layout import write_manifest
 from backend.core.metrics import compute_metrics, write_metrics_json
 from backend.core.compression.gzip_compressor import gzip_file
 from backend.core.compression.external_runners import maybe_run_fcgs, maybe_run_hacpp
-from backend.core.pruning import prune_gaussian_ply_ascii
+from backend.core.pruning import prune_gaussian_ply_ascii, prune_speedy_splat
 from backend.core.gaussians.symmetry import apply_symmetry_pruning
 
 class BalancedPipeline(BasePipeline):
@@ -82,6 +82,18 @@ class BalancedPipeline(BasePipeline):
                 ).output_path
             except Exception:
                 # Keep original splat if pruning fails
+                pass
+
+        # Optional Speedy-Splat rendering acceleration (Phase 4)
+        if self.config.speedy_prune_enabled:
+            speedy_path = os.path.join(self.output_dir, "model_gaussians_speedy.ply")
+            try:
+                splat_path = prune_speedy_splat(
+                    input_path=splat_path,
+                    output_path=speedy_path,
+                    importance_threshold=self.config.speedy_prune_threshold,
+                ).output_path
+            except Exception:
                 pass
 
         # Optional symmetry pruning (SymGS baseline)

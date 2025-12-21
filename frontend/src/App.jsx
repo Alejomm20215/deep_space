@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useProcessing } from './hooks/useProcessing';
 import UploadZone from './components/UploadZone';
 import QualitySelector from './components/QualitySelector';
 import ProcessingStatus from './components/ProcessingStatus';
 import Viewer3D from './components/Viewer3D';
-import SplatViewer from './components/SplatViewer';
 import MetricsPanel from './components/MetricsPanel';
 import DownloadPanel from './components/DownloadPanel';
 import { Box } from 'lucide-react';
@@ -12,6 +11,16 @@ import { Box } from 'lucide-react';
 const App = () => {
     const [mode, setMode] = useState('balanced');
     const { status, progress, stage, detail, result, startUpload, reset } = useProcessing();
+    const [showMeshPreview, setShowMeshPreview] = useState(true);
+
+    const hasGlb = !!result?.glb;
+    const hasMetrics = !!result?.metrics;
+
+    const resultStats = useMemo(() => {
+        const time = result?.stats?.time;
+        const triangles = result?.stats?.triangles;
+        return { time, triangles };
+    }, [result]);
 
     return (
         <div className="app-container">
@@ -64,9 +73,33 @@ const App = () => {
                 {/* State: COMPLETE - Results & Viewer */}
                 {status === 'complete' && result && (
                     <div className="fade-in">
-                        {result.glb && <Viewer3D modelUrl={result.glb} />}
-                        {result.splat && <SplatViewer splatUrl={result.splat} />}
-                        {result.metrics && <MetricsPanel metricsUrl={result.metrics} />}
+                        <div className="glass-panel" style={{ padding: '16px 18px', marginTop: '20px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                                <div>
+                                    <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 6 }}>Previews</div>
+                                    <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                                        Mesh preview only.
+                                    </div>
+                                </div>
+                                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                                    <button
+                                        className="btn-primary"
+                                        onClick={() => setShowMeshPreview((v) => !v)}
+                                        disabled={!hasGlb}
+                                        title={!hasGlb ? 'No mesh output produced' : ''}
+                                    >
+                                        {showMeshPreview ? 'Hide Mesh' : 'Show Mesh'}
+                                    </button>
+                                </div>
+                            </div>
+                            <div style={{ marginTop: 10, color: 'var(--text-muted)', fontSize: 12 }}>
+                                {resultStats.time ? <>Time: <b>{resultStats.time}</b> • </> : null}
+                                {resultStats.triangles ? <>Triangles: <b>{resultStats.triangles}</b></> : null}
+                            </div>
+                        </div>
+
+                        {hasGlb && showMeshPreview && <Viewer3D modelUrl={result.glb} />}
+                        {hasMetrics && <MetricsPanel metricsUrl={result.metrics} />}
 
                         <div style={{ textAlign: 'center', marginTop: '20px' }}>
                             <h2 style={{ fontSize: '24px', marginBottom: '8px' }}>Scan Complete!</h2>
@@ -91,7 +124,7 @@ const App = () => {
             </main>
 
             <footer style={{ textAlign: 'center', marginTop: 'auto', color: 'var(--text-muted)', fontSize: '12px' }}>
-                <p>Powered by Fast3R + Gaussian Splatting • v1.0.0</p>
+                <p>Powered by Fast3R Fusion • v1.0.0</p>
             </footer>
         </div>
     );

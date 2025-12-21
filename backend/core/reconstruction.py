@@ -35,6 +35,38 @@ class Fast3RReconstructor:
             self._pose_backend = create_best_available_pose_backend(self.config.pose_backend)
         return self._pose_backend
 
+    def _postprocess_depth(self, depth: np.ndarray) -> np.ndarray:
+        """
+        Depth Anything (and similar) often returns *relative* depth with outliers.
+        For our lightweight mesh, we aggressively smooth + normalize to reduce spikes.
+        """
+        d = np.asarray(depth, dtype=np.float32)
+        if d.ndim != 2:
+            d = d.squeeze()
+        # Replace NaNs/Infs
+        d = np.nan_to_num(d, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Normalize to [0, 1]
+        dmin = float(d.min())
+        dmax = float(d.max())
+        if dmax - dmin > 1e-6:
+            d = (d - dmin) / (dmax - dmin)
+
+        # Clip extreme outliers (prevents "exploding" triangles)
+        lo = float(np.quantile(d, 0.02))
+        hi = float(np.quantile(d, 0.98))
+        if hi - lo > 1e-6:
+            d = np.clip(d, lo, hi)
+            d = (d - lo) / (hi - lo)
+
+        # Edge-preserving smoothing (keeps object boundaries sharper than a blur)
+        try:
+            d = cv2.bilateralFilter(d, d=5, sigmaColor=0.08, sigmaSpace=5)
+        except Exception:
+            pass
+
+        return d.astype(np.float32)
+
     async def reconstruct(self, image_paths: List[str], output_dir: str, progress_callback=None) -> Dict[str, Any]:
         """
         Reconstruct 3D model from images.
@@ -50,51 +82,75 @@ class Fast3RReconstructor:
             return await self._single_image_relief(image_paths[0], output_dir, progress_callback)
 
         pose_backend = self._get_pose_backend()
+        sfm_dir = os.path.join(output_dir, "sfm")
+        print(
+            f"[reconstruction] multi-view: {len(image_paths)} images | pose_backend={getattr(pose_backend, 'name', type(pose_backend).__name__)} | sfm_dir={sfm_dir}",
+            flush=True,
+        )
         if progress_callback:
             await progress_callback(6, f"Estimating poses ({pose_backend.name})...")
-        sfm_dir = os.path.join(output_dir, "sfm")
-        pose_result = await asyncio.to_thread(pose_backend.estimate, image_paths, sfm_dir)
+        try:
+            pose_result = await asyncio.to_thread(pose_backend.estimate, image_paths, sfm_dir)
+        except Exception as e:
+            # If COLMAP fails to bootstrap (common with low overlap / low texture),
+            # fall back to OpenCV so the pipeline can still proceed end-to-end.
+            if (getattr(pose_backend, "name", "") or "") not in ("opencv", "cv"):
+                from backend.core.poses.opencv_backend import OpenCVPoseBackend
+
+                # COLMAP can fail on low-texture/low-overlap frames (no initial pair). We fall back.
+                print(
+                    f"[reconstruction] pose backend '{getattr(pose_backend, 'name', type(pose_backend).__name__)}' failed (often: no good initial image pair / weak matches); falling back to OpenCV. Error={type(e).__name__}: {e}",
+                    flush=True,
+                )
+                if progress_callback:
+                    await progress_callback(7, f"Pose backend '{pose_backend.name}' failed; falling back to OpenCV...")
+                pose_backend = OpenCVPoseBackend()
+                pose_result = await asyncio.to_thread(pose_backend.estimate, image_paths, sfm_dir)
+            else:
+                raise
         poses = pose_result.poses_c2w
         K = pose_result.K
+        print(
+            f"[reconstruction] poses ready: backend={pose_result.backend} | valid={sum(1 for v in pose_result.valid if v)}/{len(pose_result.valid)} | K_shape={getattr(K, 'shape', None)}",
+            flush=True,
+        )
 
+        # IMPORTANT QUALITY FIX:
+        # The previous implementation built a full dense relief mesh for *every* view and
+        # concatenated them. That explodes triangle count (e.g. 8 frames -> ~8x triangles)
+        # and makes the mesh look messy/duplicated.
+        #
+        # For low-resource + good-looking output, build the mesh from ONE best frame only,
+        # while still saving poses/intrinsics for downstream tasks.
         estimator = self._get_depth_estimator()
-        all_vertices, all_colors, all_faces = [], [], []
-        v_offset = 0
 
-        for idx, img_path in enumerate(image_paths):
-            if progress_callback:
-                await progress_callback(12 + int(idx / max(len(image_paths), 1) * 40), f"Depth {idx+1}/{len(image_paths)}")
+        best_path = self._select_best_image(image_paths)
+        best_idx = image_paths.index(best_path) if best_path in image_paths else 0
 
-            img = cv2.imread(img_path)
-            if img is None:
-                continue
+        if progress_callback:
+            await progress_callback(12, "Depth (best view)...")
 
-            h, w = img.shape[:2]
-            max_dim = 900
-            scale = max_dim / max(h, w)
-            if scale < 1.0:
-                img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
-
-            depth = await asyncio.to_thread(estimator.estimate, img, True)
-
-            verts, cols, faces = await asyncio.to_thread(
-                self._create_dense_relief_multiview,
-                img, depth, K, poses[idx]
-            )
-
-            faces = faces + v_offset
-            v_offset += len(verts)
-
-            all_vertices.append(verts)
-            all_colors.append(cols)
-            all_faces.append(faces)
-
-        if not all_vertices:
+        img = cv2.imread(best_path)
+        if img is None:
             return await self._single_image_relief(image_paths[0], output_dir, progress_callback)
 
-        vertices = np.concatenate(all_vertices, axis=0)
-        colors = np.concatenate(all_colors, axis=0)
-        faces = np.concatenate(all_faces, axis=0)
+        h, w = img.shape[:2]
+        # Smaller max_dim keeps triangles reasonable and makes export/viewing fast.
+        max_dim = 640
+        scale = max_dim / max(h, w)
+        if scale < 1.0:
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+
+        depth = await asyncio.to_thread(estimator.estimate, img, True)
+        depth = self._postprocess_depth(depth)
+
+        # Use the pose of the selected frame to place mesh in world coords
+        verts, cols, faces = await asyncio.to_thread(
+            self._create_dense_relief_multiview,
+            img, depth, K, poses[best_idx]
+        )
+
+        vertices, colors = verts, cols
 
         if progress_callback:
             await progress_callback(80, "Writing output...")
@@ -136,6 +192,7 @@ class Fast3RReconstructor:
 
         estimator = self._get_depth_estimator()
         depth = await asyncio.to_thread(estimator.estimate, img, True)
+        depth = self._postprocess_depth(depth)
 
         if progress_callback:
             await progress_callback(60, "Creating 3D mesh...")
@@ -213,16 +270,15 @@ class Fast3RReconstructor:
         ys, xs = np.mgrid[0:h:step, 0:w:step]
         grid_h, grid_w = ys.shape
 
-        # Get depth values
-        zs = depth[ys, xs]
+        # Get depth values (already post-processed to [0,1])
+        zs = depth[ys, xs].astype(np.float32)
 
         # Normalize coordinates to [-0.5, 0.5] range
         x_norm = (xs.astype(np.float32) / w - 0.5)
         y_norm = -(ys.astype(np.float32) / h - 0.5)  # Flip Y for 3D
 
-        # Depth scaling: invert so foreground pops outward
-        # Use 0.3 as depth scale for noticeable but not extreme relief
-        depth_scale = 0.3
+        # Depth scaling: keep relief subtle to avoid warped "spikes"
+        depth_scale = 0.12
         z_norm = (0.5 - zs) * depth_scale
 
         # Stack into vertices (N, 3)
@@ -263,13 +319,16 @@ class Fast3RReconstructor:
         ys, xs = np.mgrid[0:h:step, 0:w:step]
         grid_h, grid_w = ys.shape
 
-        zs = depth[ys, xs]
+        # Depth is *relative*; keep it normalized + bounded to avoid huge spikes.
+        zs = depth[ys, xs].astype(np.float32)
 
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
-        x_cam = (xs - cx) * zs / fx
-        y_cam = (ys - cy) * zs / fy
-        z_cam = zs
+        # Map relative depth to a stable pseudo-metric range.
+        # Keep z positive (COLMAP/3DGS expect forward-facing camera Z).
+        z_cam = 1.0 + (0.5 - zs) * 0.8
+        x_cam = (xs - cx) * z_cam / fx
+        y_cam = (ys - cy) * z_cam / fy
 
         pts_cam = np.stack([x_cam, -y_cam, z_cam], axis=-1).reshape(-1, 3).astype(np.float32)
 

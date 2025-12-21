@@ -1,0 +1,12 @@
+#
+# Wrapper-only rebuild for the 3DGS trainer.
+#
+# Use this when you only changed `backend/gs_trainer/train_wrapper.py`
+# and want to avoid rebuilding CUDA extensions.
+#
+# Build:
+#   docker build -f backend/gs_trainer/Dockerfile.wrapper_only -t deep_space_3dgs_trainer:cu117 .
+#
+FROM deep_space_3dgs_trainer:cu117
+COPY backend/gs_trainer/train_wrapper.py /opt/gs/train_wrapper.py
+

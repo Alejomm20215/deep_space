@@ -32,45 +32,7 @@ const DownloadPanel = ({ result, onReset }) => {
                     </a>
                 )}
 
-                {result.splat && (
-                    <a href={result.splat} download className="glass-panel" style={{
-                        padding: '20px',
-                        textDecoration: 'none',
-                        color: 'white',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '15px',
-                        transition: 'transform 0.2s'
-                    }}>
-                        <div style={{ background: '#db2777', padding: '10px', borderRadius: '8px' }}>
-                            <Download size={20} />
-                        </div>
-                        <div>
-                            <div style={{ fontWeight: 600 }}>Download Splat</div>
-                            <div style={{ fontSize: '12px', opacity: 0.7 }}>Gaussian splat (PLY)</div>
-                        </div>
-                    </a>
-                )}
-
-                {result.splat_gz && (
-                    <a href={result.splat_gz} download className="glass-panel" style={{
-                        padding: '20px',
-                        textDecoration: 'none',
-                        color: 'white',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '15px',
-                        transition: 'transform 0.2s'
-                    }}>
-                        <div style={{ background: '#7c3aed', padding: '10px', borderRadius: '8px' }}>
-                            <Download size={20} />
-                        </div>
-                        <div>
-                            <div style={{ fontWeight: 600 }}>Download Splat (.gz)</div>
-                            <div style={{ fontSize: '12px', opacity: 0.7 }}>Compressed for storage/transfer</div>
-                        </div>
-                    </a>
-                )}
+                {/* Splat downloads intentionally removed from UI (too heavy / browser-hostile). */}
 
                 {result.metrics && (
                     <a href={result.metrics} download className="glass-panel" style={{
