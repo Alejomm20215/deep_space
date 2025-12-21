@@ -31,7 +31,7 @@ Outputs are written per job under `backend/outputs/{job_id}/` and served at:
 When the pipeline produces a Gaussian Splat, the rendered color is formed by front-to-back compositing of ordered contributions \(k\):
 
 $$
-C=\sum_k\left(\alpha_k\prod_{m<k}(1-\alpha_m)\right)c_k
+C=\sum_k\left(\alpha_k\prod_{m=1}^{k-1}(1-\alpha_m)\right)c_k
 $$
 
 ---
@@ -368,7 +368,7 @@ G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
 $$
 
 $$
-C=\sum_k\left(\alpha_k\prod_{m<k}(1-\alpha_m)\right)c_k
+C=\sum_k\left(\alpha_k\prod_{m=1}^{k-1}(1-\alpha_m)\right)c_k
 $$
 
 ---
@@ -691,7 +691,7 @@ G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
 $$
 
 $$
-C=\sum_k\left(\alpha_k\prod_{m<k}(1-\alpha_m)\right)c_k
+C=\sum_k\left(\alpha_k\prod_{m=1}^{k-1}(1-\alpha_m)\right)c_k
 $$
 
 ---
@@ -954,7 +954,7 @@ G(X)=\exp\!\left(-\tfrac{1}{2}(X-\mu)^T\Sigma^{-1}(X-\mu)\right)
 $$
 
 $$
-C=\sum_k\left(\alpha_k\prod_{m<k}(1-\alpha_m)\right)c_k
+C=\sum_k\left(\alpha_k\prod_{m=1}^{k-1}(1-\alpha_m)\right)c_k
 $$
 
 ---
