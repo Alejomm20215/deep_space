@@ -1,6 +1,6 @@
-# Deep Space 3D (FastAPI + React)
+# Deep Space
 
-Local 3D reconstruction from **a short video** or **a small set of images**, producing a **mesh preview (GLB)** and an optional **Gaussian Splat (PLY)** with robust fallbacks for constrained hardware.
+Local 3D reconstruction from **video** or **a set of images**, producing a **mesh preview (GLB)** or a **Gaussian Splat (PLY)**.
 
 ---
 
