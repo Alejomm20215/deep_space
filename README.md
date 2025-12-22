@@ -36,7 +36,7 @@ $$
 
 ---
 
-## Method (pipeline, with the math where it belongs)
+## Method (pipeline)
 
 ### 1) Keyframe selection
 Extract a contiguous, overlapping set of frames from video (or resize the input image set). Overlap matters because downstream geometry estimation relies on consistent feature correspondences.
